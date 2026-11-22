@@ -1,2 +1,4 @@
 labs/
 *.o
+build/
+*.d
