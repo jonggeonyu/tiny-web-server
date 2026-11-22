@@ -12,7 +12,7 @@
 
 #include <stddef.h>
 
-#define WRITER_MAX_EXTRA 4
+#define WRITER_MAX_EXTRA 16 /* CGI 가 Set-Cookie 등 여러 헤더를 낼 수 있으므로 넉넉히 */
 
 typedef struct {
     int fd;
@@ -35,6 +35,7 @@ typedef struct {
     long long body_len;     /* Content-Length 로 알린 본문 길이 */
     int failed;             /* 전송 실패 (클라이언트가 끊음, 파일이 중간에 줄어듦 등) → 연결을 닫아야 함 */
     const char *note;       /* 로그에 남길 짧은 이유 (예: "심볼릭 링크가 루트 밖"). 없으면 NULL */
+    char note_buf[128];     /* 이유를 snprintf 로 만들 때 쓰는 공간 (연결마다 따로 → 스레드 안전) */
 } http_writer;
 
 void writer_init(http_writer *w, int fd);
@@ -46,7 +47,9 @@ int writer_add_header(http_writer *w, const char *name, const char *value);
  * 최종 응답이 아니므로 status 는 그대로 0 이고, 이후 진짜 응답을 보내야 한다. 반환: 0 / -1 */
 int writer_send_continue(http_writer *w);
 
-/* 응답 머리 전송. content_type 이 NULL 이면 Content-Type 생략. 반환: 0 / -1 */
+/* 응답 머리 전송. content_type 이 NULL 이면 Content-Type 생략. 반환: 0 / -1
+ * 머리 조립에 실패하면(헤더가 너무 길거나 값이 잘못됨) 아무것도 보내지 않고 -1, status 는 0 그대로
+ * → 호출한 쪽이 다른 에러 응답을 보낼 수 있다 */
 int writer_send_head(http_writer *w, int status, const char *content_type,
                      long long content_length);
 

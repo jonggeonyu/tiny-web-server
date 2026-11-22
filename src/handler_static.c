@@ -136,7 +136,7 @@ void static_serve(const char *root, const http_request *req, const char *path, h
         return;
     }
 
-    int fd = open(real, O_RDONLY);
+    int fd = open(real, O_RDONLY | O_CLOEXEC); /* CGI 에 새어 나가지 않게 */
     if (fd < 0) {
         if (errno == EACCES)
             w->note = "파일 읽기 권한 없음";

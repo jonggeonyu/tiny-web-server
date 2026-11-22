@@ -1,6 +1,7 @@
 #include "server.h"
 
 #include "conn.h"
+#include "netio.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -19,6 +20,9 @@ int server_listen(int port)
         fprintf(stderr, "socket 실패: %s\n", strerror(errno));
         return -1;
     }
+
+    /* CGI 를 exec 할 때 이 소켓이 CGI 프로그램에 넘어가지 않도록 */
+    net_set_cloexec(fd);
 
     /* SO_REUSEADDR: 서버를 껐다가 바로 다시 켤 때, 이전 연결의 흔적(TIME_WAIT) 때문에
      * "Address already in use" 로 bind 가 실패하는 것을 막는다. */
@@ -74,6 +78,11 @@ void server_run(int listen_fd, const server_config *cfg)
             fprintf(stderr, "accept 실패: %s\n", strerror(errno));
             continue;
         }
+
+        /* 클라이언트 소켓도 CGI 에 넘어가면 안 된다. (리눅스의 accept4 는 한 번에 되지만 POSIX 가 아님)
+         * Step 8 의 스레드 풀에서는 accept 와 fcntl 사이에 다른 스레드가 fork 할 수 있는 틈이 있어서,
+         * CGI 자식 쪽에서도 fd 를 한 번 더 닫는다 (handler_cgi.c) */
+        net_set_cloexec(client_fd);
 
         char ip[INET_ADDRSTRLEN] = "?";
         inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));

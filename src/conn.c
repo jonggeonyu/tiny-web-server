@@ -8,11 +8,14 @@
 #include "router.h"
 #include "writer.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 /* 에러 뒤 부드럽게 닫기: 최대 2초, 최대 1MB 까지 남은 입력을 읽어 버린다 */
@@ -188,7 +191,32 @@ static void handle_request(int fd, const http_request *req, const char *buf, siz
         *body_done = 1;
     }
 
-    router_dispatch(&rt, req, path, &body, w, cfg);
+    /* 처리기에 넘길 재료 묶음. 클라이언트 주소는 CGI 의 REMOTE_ADDR 등에 쓰인다 */
+    char remote_addr[INET6_ADDRSTRLEN] = "unknown";
+    int remote_port = 0;
+    struct sockaddr_storage peer;
+    socklen_t peer_len = sizeof(peer);
+    if (getpeername(fd, (struct sockaddr *)&peer, &peer_len) == 0) {
+        if (peer.ss_family == AF_INET) {
+            struct sockaddr_in *a = (struct sockaddr_in *)&peer;
+            inet_ntop(AF_INET, &a->sin_addr, remote_addr, sizeof(remote_addr));
+            remote_port = ntohs(a->sin_port);
+        } else if (peer.ss_family == AF_INET6) {
+            struct sockaddr_in6 *a = (struct sockaddr_in6 *)&peer;
+            inet_ntop(AF_INET6, &a->sin6_addr, remote_addr, sizeof(remote_addr));
+            remote_port = ntohs(a->sin6_port);
+        }
+    }
+    request_ctx ctx = {
+        .req = req,
+        .path = path,
+        .body = &body,
+        .cfg = cfg,
+        .remote_addr = remote_addr,
+        .remote_port = remote_port,
+    };
+
+    router_dispatch(&rt, &ctx, w);
     free(body.data);
 }
 

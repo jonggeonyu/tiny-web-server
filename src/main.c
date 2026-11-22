@@ -1,7 +1,7 @@
 /*
  * tiny-web-server 진입점: 명령줄 인자 해석, 시그널 설정, 서버 시작.
  *
- *   ./build/tiny -p 8080 -r ./www [-T 유휴시간(초)]
+ *   ./build/tiny -p 8080 -r ./www -c ./cgi-bin [-T 유휴시간(초)]
  */
 #include "config.h"
 #include "server.h"
@@ -16,12 +16,14 @@
 
 #define DEFAULT_PORT 8080
 #define DEFAULT_ROOT "./www"
+#define DEFAULT_CGI_DIR "./cgi-bin"
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트] [-T 초]\n", prog);
+    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트] [-c CGI디렉토리] [-T 초]\n", prog);
     fprintf(stderr, "  -p 포트   듣는 포트 번호 (1~65535, 기본값 %d)\n", DEFAULT_PORT);
     fprintf(stderr, "  -r 루트   정적 파일 루트 디렉토리 (기본값 %s)\n", DEFAULT_ROOT);
+    fprintf(stderr, "  -c 디렉토리 CGI 프로그램 디렉토리 (기본값 %s)\n", DEFAULT_CGI_DIR);
     fprintf(stderr, "  -T 초     클라이언트가 아무것도 안 보낼 때 기다리는 최대 시간 (기본값 %d)\n",
             DEFAULT_IDLE_TIMEOUT_MS / 1000);
 }
@@ -59,10 +61,12 @@ int main(int argc, char **argv)
     cfg.port = DEFAULT_PORT;
     cfg.idle_timeout_ms = DEFAULT_IDLE_TIMEOUT_MS;
     cfg.request_timeout_ms = DEFAULT_REQUEST_TIMEOUT_MS;
+    cfg.cgi_timeout_ms = DEFAULT_CGI_TIMEOUT_MS;
     const char *root_arg = DEFAULT_ROOT;
+    const char *cgi_arg = DEFAULT_CGI_DIR;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:r:T:h")) != -1) {
+    while ((opt = getopt(argc, argv, "p:r:c:T:h")) != -1) {
         switch (opt) {
         case 'p':
             cfg.port = parse_port(optarg);
@@ -73,6 +77,9 @@ int main(int argc, char **argv)
             break;
         case 'r':
             root_arg = optarg;
+            break;
+        case 'c':
+            cgi_arg = optarg;
             break;
         case 'T': {
             int sec = parse_port(optarg); /* 1~65535 범위의 양의 정수 검사를 재사용 */
@@ -94,6 +101,11 @@ int main(int argc, char **argv)
 
     if (resolve_root(root_arg, cfg.root) < 0)
         return 1;
+    /* CGI 디렉토리는 없어도 서버는 뜬다 (CGI 요청만 404) */
+    if (resolve_root(cgi_arg, cfg.cgi_dir) < 0) {
+        fprintf(stderr, "  → CGI 를 끄고 시작합니다\n");
+        cfg.cgi_dir[0] = '\0';
+    }
 
     /* SIGPIPE 무시: 이미 끊긴 상대에게 write 하면 운영체제가 SIGPIPE 를 보내고,
      * 기본 동작은 "프로그램 종료"다. 무시해 두면 write 가 -1(EPIPE)을 돌려줄 뿐이다. */
@@ -110,7 +122,8 @@ int main(int argc, char **argv)
     if (listen_fd < 0)
         return 1;
 
-    printf("서버 시작: http://localhost:%d  루트: %s  (종료: Ctrl+C)\n", cfg.port, cfg.root);
+    printf("서버 시작: http://localhost:%d  루트: %s  CGI: %s  (종료: Ctrl+C)\n", cfg.port,
+           cfg.root, cfg.cgi_dir[0] ? cfg.cgi_dir : "(꺼짐)");
     fflush(stdout);
 
     server_run(listen_fd, &cfg);

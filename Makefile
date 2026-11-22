@@ -35,7 +35,14 @@ ASAN_TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD)/asan/tests/%)
 # 테스트용 .o 같은 중간 파일을 make 가 자동 삭제하지 않게 한다 (재빌드 방지)
 .SECONDARY:
 
-all: $(BUILD)/tiny
+# C 로 만든 CGI 예제 (cgi-bin/adder.c → cgi-bin/adder)
+CGI_SRCS := $(wildcard cgi-bin/*.c)
+CGI_BINS := $(CGI_SRCS:.c=)
+
+all: $(BUILD)/tiny $(CGI_BINS)
+
+cgi-bin/%: cgi-bin/%.c
+	$(CC) -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -O2 $< -o $@
 
 # ---------- 일반 빌드 ----------
 $(BUILD)/tiny: $(OBJS)
@@ -80,7 +87,7 @@ asan: $(BUILD)/tiny-asan $(ASAN_TEST_BINS)
 	$(call run_tests,$(ASAN_TEST_BINS))
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf $(BUILD) $(CGI_BINS)
 
 # 헤더 파일 변경 시 자동 재컴파일을 위한 의존성 파일
 -include $(OBJS:.o=.d) $(ASAN_OBJS:.o=.d) \

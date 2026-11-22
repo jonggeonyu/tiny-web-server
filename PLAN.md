@@ -106,7 +106,9 @@ main → server → threadpool → conn → router → handler_static / handler_
 | **413** Content Too Large | 본문이 제한 초과 | `Content-Length` > 1 MiB (설정값) → 본문을 읽기 전에 거절 |
 | **414** URI Too Long | URI가 너무 김 | 요청 타깃 > 4 KiB |
 | **431** Request Header Fields Too Large | 헤더가 너무 큼 | 헤더 전체 > 8 KiB 또는 헤더 개수 > 64 |
-| **500** Internal Server Error | 서버 내부 실패 | `malloc` 실패, CGI `fork`/`exec` 실패, CGI 비정상 종료·타임아웃, CGI 출력 형식 오류 |
+| **500** Internal Server Error | 서버 내부 실패 | `malloc` 실패, CGI 용 `pipe`/`fork` 실패 |
+| **502** Bad Gateway | CGI(뒤쪽 프로그램)가 잘못함 | CGI 가 시그널로 죽음, 종료 코드 ≠ 0, `exec` 실패, 출력 형식 오류, 출력 8MB 초과 |
+| **504** Gateway Timeout | CGI 가 시간 안에 안 끝남 | 5초 초과 → 프로세스 그룹째 강제 종료 후 회수 |
 | **501** Not Implemented | 서버가 모르는/구현 안 한 기능 | `PUT`, `DELETE`, `PATCH` 등 미구현 메서드, 요청의 `Transfer-Encoding: chunked` |
 | **505** HTTP Version Not Supported | 지원 안 하는 버전 | `HTTP/2.0`, `HTTP/0.9` (형식 자체가 `HTTP/x.y`가 아니면 400) |
 
@@ -212,7 +214,8 @@ main → server → threadpool → conn → router → handler_static / handler_
   - 환경 변수: `REQUEST_METHOD`, `QUERY_STRING`, `CONTENT_LENGTH`, `CONTENT_TYPE`, `SCRIPT_NAME`, `SERVER_PROTOCOL`, `SERVER_PORT`, `REMOTE_ADDR`, `HTTP_*`.
   - POST 본문 → 파이프로 CGI의 stdin, CGI stdout → 파이프로 읽어서 응답.
   - CGI 출력의 헤더(`Content-Type`, `Status:`)를 해석하고 `Content-Length`는 서버가 계산.
-  - `waitpid()`로 좀비 회수, 실행 시간 제한(예: 5초) 초과 시 `kill` 후 500.
+  - `waitpid()`로 좀비 회수, 실행 시간 제한(예: 5초) 초과 시 `kill` 후 504. CGI 가 죽거나 출력이 잘못되면 502.
+  - 본문 넣기와 출력 받기를 `poll` 로 동시에 (교착 방지). CGI 디렉토리 밖(심볼릭 링크)·실행 권한 없음 → 403.
   - 멀티스레드에서 fork하므로: env/argv 준비는 fork **전에**, 자식은 dup2/exec만. 소켓 fd에는 `FD_CLOEXEC`.
 - **확인**
   ```bash

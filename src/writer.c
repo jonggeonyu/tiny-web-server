@@ -7,7 +7,7 @@
 #include <time.h>
 
 #define SERVER_NAME "tiny-web-server"
-#define HEAD_BUF_SIZE 1024
+#define HEAD_BUF_SIZE 8192 /* CGI 가 헤더를 여러 개 낼 수 있으므로 넉넉히 */
 
 void writer_init(http_writer *w, int fd)
 {
@@ -73,10 +73,8 @@ int writer_send_head(http_writer *w, int status, const char *content_type,
 
     char buf[HEAD_BUF_SIZE];
     size_t len = build_head(w, status, content_type, content_length, buf, sizeof(buf));
-    if (len == 0) {
-        w->failed = 1;
-        return -1;
-    }
+    if (len == 0)
+        return -1; /* 조립 실패: 아직 아무것도 안 보냈으므로 failed 가 아니다 → 다른 응답 가능 */
     w->status = status;
     w->body_len = content_length;
     if (net_write_all(w->fd, buf, len) < 0) {
@@ -109,10 +107,8 @@ int writer_send_all(http_writer *w, int status, const char *content_type, const 
      * (나눠 보내면 TCP 가 작은 조각을 모으려고 기다리는 지연이 생길 수 있다) */
     char buf[HEAD_BUF_SIZE + 2048];
     size_t head_len = build_head(w, status, content_type, (long long)len, buf, sizeof(buf));
-    if (head_len == 0) {
-        w->failed = 1;
-        return -1;
-    }
+    if (head_len == 0)
+        return -1; /* 조립 실패: 아직 아무것도 안 보냈으므로 failed 가 아니다 → 다른 응답 가능 */
     w->status = status;
     w->body_len = (long long)len;
 

@@ -28,6 +28,13 @@ long long net_now_ms(void);
  * 반환: 0 = 전부 씀, -1 = 에러(errno 설정. 예: EPIPE = 상대가 이미 끊음) */
 int net_write_all(int fd, const void *buf, size_t len);
 
+/* fd 에 FD_CLOEXEC 표시: exec 로 다른 프로그램(CGI)이 실행될 때 이 fd 는 자동으로 닫힌다.
+ * 서버의 소켓/파일이 CGI 프로그램에 새어 나가지 않게 하는 기본 방어. 반환: 0 / -1 */
+int net_set_cloexec(int fd);
+
+/* fd 를 논블로킹으로: 읽을/쓸 게 없으면 기다리지 않고 바로 -1 + EAGAIN 을 돌려준다. 반환: 0 / -1 */
+int net_set_nonblock(int fd);
+
 /* "부드럽게 닫기" (lingering close).
  * 클라이언트가 보낸 데이터를 다 읽지 않은 채 close() 하면, 운영체제가 RST(강제 종료)를 보내서
  * 방금 보낸 응답(예: 413 에러 페이지)이 클라이언트에 도착하기 전에 지워질 수 있다.

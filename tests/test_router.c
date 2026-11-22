@@ -32,8 +32,24 @@ static void test_static_route(void)
     CHECK_EQ_INT(router_match("POST", "/a/echo").kind, ROUTE_STATIC);
 }
 
+static void test_cgi_route(void)
+{
+    route r = router_match("GET", "/cgi-bin/hello.sh");
+    CHECK_EQ_INT(r.kind, ROUTE_CGI);
+    CHECK_EQ_INT(r.wants_body, 0);
+    r = router_match("POST", "/cgi-bin/echo_post.sh");
+    CHECK_EQ_INT(r.kind, ROUTE_CGI);
+    CHECK_EQ_INT(r.wants_body, 1); /* POST 본문은 CGI 표준 입력으로 */
+    CHECK_EQ_INT(router_match("GET", "/cgi-bin/x/extra/path").kind, ROUTE_CGI);
+    CHECK_EQ_INT(router_match("GET", "/cgi-bin").kind, ROUTE_CGI);
+    CHECK_EQ_INT(router_match("GET", "/cgi-bin/").kind, ROUTE_CGI);
+    CHECK_EQ_INT(router_match("GET", "/cgi-binx/a").kind, ROUTE_STATIC); /* 이름만 비슷 */
+    CHECK_EQ_INT(router_match("GET", "/a/cgi-bin/x").kind, ROUTE_STATIC);
+}
+
 int main(void)
 {
+    RUN_TEST(test_cgi_route);
     RUN_TEST(test_echo_route);
     RUN_TEST(test_static_route);
     return TEST_REPORT();

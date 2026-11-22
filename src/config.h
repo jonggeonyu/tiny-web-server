@@ -26,13 +26,19 @@
 #define DEFAULT_IDLE_TIMEOUT_MS    10000  /* 한 번 기다릴 때 최대: 이 시간 동안 1바이트도 안 오면 끊음 */
 #define DEFAULT_REQUEST_TIMEOUT_MS 30000  /* 요청 하나(헤더 + 본문)를 다 받을 때까지의 총 시간 */
 
+/* CGI */
+#define DEFAULT_CGI_TIMEOUT_MS 5000            /* CGI 실행 최대 시간. 넘으면 강제 종료 + 504 */
+#define CGI_OUTPUT_MAX (8 * 1024 * 1024)       /* CGI 출력 최대 크기. 넘으면 강제 종료 + 502 */
+
 /* 실행 시 정해지는 설정 (명령줄 인자로 채운다).
  * 2단계에서 routes[], backends[] 같은 항목을 여기에 추가한다. */
 typedef struct {
     int port;
     char root[PATH_MAX];      /* 정적 파일 루트. realpath 로 바꾼 절대 경로 (끝에 '/' 없음) */
+    char cgi_dir[PATH_MAX];   /* CGI 디렉토리. realpath 결과. 빈 문자열이면 CGI 끔 */
     int idle_timeout_ms;
     int request_timeout_ms;
+    int cgi_timeout_ms;
 } server_config;
 
 #endif /* CONFIG_H */

@@ -1,6 +1,7 @@
 #include "netio.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -33,6 +34,22 @@ int net_write_all(int fd, const void *buf, size_t len)
         left -= (size_t)n;
     }
     return 0;
+}
+
+int net_set_cloexec(int fd)
+{
+    int flags = fcntl(fd, F_GETFD);
+    if (flags < 0)
+        return -1;
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
+int net_set_nonblock(int fd)
+{
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0)
+        return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 long long net_now_ms(void)

@@ -2,3 +2,4 @@ labs/
 *.o
 build/
 *.d
+cgi-bin/adder
