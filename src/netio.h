@@ -21,4 +21,11 @@ ssize_t net_read(int fd, void *buf, size_t len);
  * 반환: 0 = 전부 씀, -1 = 에러(errno 설정. 예: EPIPE = 상대가 이미 끊음) */
 int net_write_all(int fd, const void *buf, size_t len);
 
+/* "부드럽게 닫기" (lingering close).
+ * 클라이언트가 보낸 데이터를 다 읽지 않은 채 close() 하면, 운영체제가 RST(강제 종료)를 보내서
+ * 방금 보낸 응답(예: 413 에러 페이지)이 클라이언트에 도착하기 전에 지워질 수 있다.
+ * 그래서: 1) 쓰기 방향만 먼저 닫아 "응답 끝"을 알리고  2) 남은 입력을 잠깐 읽어 버린 뒤  3) close.
+ * timeout_ms 또는 max_bytes 에 도달하면 그냥 닫는다 (악성 클라이언트가 붙잡고 있지 못하게). */
+void net_lingering_close(int fd, int timeout_ms, size_t max_bytes);
+
 #endif /* NETIO_H */

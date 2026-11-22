@@ -1,6 +1,9 @@
 #include "netio.h"
 
 #include <errno.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 ssize_t net_read(int fd, void *buf, size_t len)
@@ -30,4 +33,40 @@ int net_write_all(int fd, const void *buf, size_t len)
         left -= (size_t)n;
     }
     return 0;
+}
+
+static long long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts); /* 시계를 바꿔도 영향 없는 "흐른 시간" 시계 */
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+void net_lingering_close(int fd, int timeout_ms, size_t max_bytes)
+{
+    /* 1) 쓰기 방향만 닫기: 상대는 "응답이 끝났다"(EOF)를 알게 된다. 읽기는 아직 가능 */
+    if (shutdown(fd, SHUT_WR) == 0) {
+        long long deadline = now_ms() + timeout_ms;
+        size_t drained = 0;
+        char junk[4096];
+
+        /* 2) 상대가 닫을 때까지(또는 시간/양 제한까지) 남은 입력을 읽어서 버린다 */
+        while (drained < max_bytes) {
+            long long left = deadline - now_ms();
+            if (left <= 0)
+                break;
+            struct pollfd pfd = {.fd = fd, .events = POLLIN};
+            int pr = poll(&pfd, 1, (int)left); /* 읽을 게 생길 때까지 최대 left ms 대기 */
+            if (pr < 0 && errno == EINTR)
+                continue;
+            if (pr <= 0)
+                break; /* 시간 초과 또는 에러 */
+            ssize_t n = net_read(fd, junk, sizeof(junk));
+            if (n <= 0)
+                break; /* 상대가 닫음(0) 또는 에러 */
+            drained += (size_t)n;
+        }
+    }
+    /* 3) 완전히 닫기 */
+    close(fd);
 }

@@ -33,7 +33,8 @@ tiny-web-server/
 │   ├── server.c/.h       # socket → bind → listen → accept 루프
 │   ├── threadpool.c/.h   # 작업 큐 + pthread 워커
 │   ├── conn.c/.h         # 연결 1개 처리: 읽기 버퍼, keep-alive 반복, 타임아웃
-│   ├── netio.c/.h        # read/write 래퍼 (EINTR 재시도, 부분 쓰기 처리)
+│   ├── netio.c/.h        # read/write 래퍼 (EINTR 재시도, 부분 쓰기 처리, 부드럽게 닫기)
+│   ├── writer.c/.h       # 응답 전송 도구: handler 는 소켓 대신 이걸로만 보냄 (HEAD 본문 생략, 연결 유지 판단)
 │   │
 │   │   ── HTTP 계층 (소켓을 모르는 코드, 단위 테스트 대상) ──
 │   ├── http_parser.c/.h  # 바이트 버퍼 → http_request 구조체

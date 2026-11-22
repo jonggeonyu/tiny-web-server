@@ -2,14 +2,20 @@
 
 #include "config.h"
 #include "http_parser.h"
+#include "http_response.h"
 #include "netio.h"
 #include "path.h"
+#include "writer.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* 에러 뒤 부드럽게 닫기: 최대 2초, 최대 1MB 까지 남은 입력을 읽어 버린다 */
+#define LINGER_TIMEOUT_MS 2000
+#define LINGER_MAX_BYTES (1024 * 1024)
 
 /* 요청 헤더를 끝까지 읽고 파싱한다.
  * TCP 는 "메시지"가 아니라 "바이트의 흐름"이라서 read 한 번에 요청 전체가 온다는 보장이 없다.
@@ -38,35 +44,27 @@ static int read_and_parse(int fd, char *buf, size_t cap, size_t *used, http_requ
     }
 }
 
-/* 학습용: 파싱 결과를 보기 좋게 출력 */
-static void log_request(const http_request *req, size_t used)
+/* 요청 처리 (Step 4: 경로 검사 후 고정 응답). 결과는 writer 에 기록된다. */
+static void handle_request(const http_request *req, http_writer *w)
 {
-    printf("----- 파싱 결과 -----\n");
-    printf("  method   = %s\n", req->method);
-    printf("  target   = %s%s\n", req->target,
-           req->target_form == HTTP_TARGET_ABSOLUTE ? "  (absolute-form)" : "");
-    printf("  path     = %s\n", req->path);
-    printf("  query    = %s\n", req->query);
-    printf("  version  = HTTP/%d.%d\n", req->version_major, req->version_minor);
-
-    char norm[HTTP_URI_MAX + 1];
-    switch (path_decode_normalize(req->path, norm, sizeof(norm))) {
-    case PATH_OK:           printf("  정규화    = %s\n", norm); break;
-    case PATH_BAD_ENCODING: printf("  정규화    = (잘못된 퍼센트 인코딩 → Step 4에서 400)\n"); break;
-    case PATH_ESCAPES_ROOT: printf("  정규화    = (루트 밖으로 나감 → Step 5에서 403)\n"); break;
-    case PATH_TOO_LONG:     printf("  정규화    = (너무 김 → 414)\n"); break;
+    char path[HTTP_URI_MAX + 1];
+    switch (path_decode_normalize(req->path, path, sizeof(path))) {
+    case PATH_OK:
+        break;
+    case PATH_BAD_ENCODING:
+        writer_send_error(w, 400);
+        return;
+    case PATH_ESCAPES_ROOT:
+        writer_send_error(w, 403);
+        return;
+    case PATH_TOO_LONG:
+        writer_send_error(w, 414);
+        return;
     }
 
-    printf("  headers  = %d개\n", req->header_count);
-    for (int i = 0; i < req->header_count; i++)
-        printf("    [%s] = [%s]\n", req->headers[i].name, req->headers[i].value);
-    printf("  host           = %s\n", req->host ? req->host : "(없음)");
-    printf("  content_length = %lld\n", req->content_length);
-    printf("  keep_alive     = %s\n", req->keep_alive ? "yes" : "no");
-    if (used > req->head_len)
-        printf("  (헤더 뒤에 본문 앞부분 %zu바이트를 이미 받음 → Step 6에서 사용)\n",
-               used - req->head_len);
-    fflush(stdout);
+    /* 아직은 고정 응답 (Step 5에서 정적 파일로 바뀜) */
+    const char *body = "Hello, world!\n";
+    writer_send_all(w, 200, "text/plain; charset=utf-8", body, strlen(body));
 }
 
 void conn_handle(int client_fd)
@@ -82,34 +80,42 @@ void conn_handle(int client_fd)
         return;
     }
 
+    http_writer w;
+    writer_init(&w, client_fd);
+
     int r = read_and_parse(client_fd, buf, sizeof(buf), &used, req);
+    int parsed_ok = (r == HTTP_PARSE_OK);
+
+    /* 연결 유지 판단 재료. 실제 판단은 writer 가 응답 상태를 보고 한다 (http_keep_alive_after) */
+    w.parsed_ok = parsed_ok;
+    w.client_keep_alive = parsed_ok && req->keep_alive;
+    w.server_keep_alive = 0; /* keep-alive 반복 처리는 Step 9에서 구현 → 지금은 항상 닫음 */
 
     if (r == HTTP_PARSE_ERROR) {
-        /* Step 4에서 이 상태 코드로 실제 에러 응답을 보낸다. 지금은 로그만 남기고 끊는다. */
-        printf("----- 파싱 실패: %d (%s) → 연결 종료 -----\n", req->error_status,
-               req->error_reason);
-        fflush(stdout);
-    } else if (r == HTTP_PARSE_OK) {
-        log_request(req, used);
+        /* 요청을 해석하지 못함 → 에러 응답 (parsed_ok=0 이므로 writer 가 Connection: close 로 보냄) */
+        writer_send_error(&w, req->error_status);
+        printf("  → %d %s (%s)\n", w.status, http_status_text(w.status), req->error_reason);
+    } else if (parsed_ok) {
+        w.head_only = (strcmp(req->method, "HEAD") == 0);
+        handle_request(req, &w);
 
-        /* 응답은 아직 Step 2 의 고정 응답 */
-        const char *body = "Hello, world!\n";
-        char res[512];
-        int res_len = snprintf(res, sizeof(res),
-                               "HTTP/1.1 200 OK\r\n"
-                               "Content-Type: text/plain; charset=utf-8\r\n"
-                               "Content-Length: %zu\r\n"
-                               "Connection: close\r\n"
-                               "\r\n"
-                               "%s",
-                               strlen(body), body);
-
-        if (res_len > 0 && (size_t)res_len < sizeof(res)) {
-            if (net_write_all(client_fd, res, (size_t)res_len) < 0)
-                fprintf(stderr, "  응답 전송 실패: %s\n", strerror(errno));
-        }
+        printf("  \"%s %s HTTP/%d.%d\" → %d %s (본문 %lld바이트%s)\n", req->method,
+               req->target, req->version_major, req->version_minor, w.status,
+               http_status_text(w.status), w.body_len, w.head_only ? ", HEAD 라서 생략" : "");
     }
+    fflush(stdout);
 
+    if (w.failed)
+        fprintf(stderr, "  응답 전송 실패: %s\n", strerror(errno));
+
+    /* 클라이언트가 보낸 데이터가 아직 남아 있을 수 있으면 부드럽게 닫는다:
+     *  - 파싱 에러(요청 끝을 모름), 본문이 있는 요청(본문 읽기는 Step 6) */
+    int maybe_unread = (r == HTTP_PARSE_ERROR) ||
+                       (parsed_ok && req->content_length > 0);
     free(req);
-    close(client_fd);
+
+    if (maybe_unread && !w.failed)
+        net_lingering_close(client_fd, LINGER_TIMEOUT_MS, LINGER_MAX_BYTES);
+    else
+        close(client_fd);
 }
