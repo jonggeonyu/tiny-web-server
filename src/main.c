@@ -1,4 +1,4 @@
-/* 서버 진입점 (F1, F12 일부, N5). 지금은 반복형(iterative) echo 서버다.
+/* 서버 진입점 (F1, F12 일부, N5). 지금은 반복형(iterative) HTTP 서버다.
  * 한 번에 한 연결만 처리하고, 동시 처리는 스레드 풀 단계(N1, N2)에서 붙인다. */
 #include <errno.h>
 #include <netdb.h>
@@ -9,7 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "echo.h"
+#include "connection.h"
 #include "net.h"
 #include "server_limits.h"
 
@@ -86,7 +86,7 @@ static void serve_forever(int listenfd)
         }
 
         log_connection(&client, client_length);
-        if (echo_serve_connection(connfd) < 0) {
+        if (connection_serve(connfd) < 0) {
             int saved_errno = errno;
             fprintf(stderr, "warn: connection ended with error: %s\n",
                     strerror(saved_errno));

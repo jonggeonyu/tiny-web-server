@@ -58,3 +58,18 @@ wait_fds() {
 
 trap stop_server EXIT
 
+# raw_request <port> <printf 형식 문자열> : nc로 바이트를 그대로 보내고 응답 전체를 출력
+raw_request() {
+    printf "$2" | timeout 3 nc -N 127.0.0.1 "$1"
+}
+
+# status_of <응답> : 첫 줄의 상태 코드
+status_of() { printf '%s' "$1" | head -1 | awk '{print $2}'; }
+
+# expect_status <이름> <기대 코드> <실제 코드>
+expect_status() {
+    if [ "$3" = "$2" ]; then pass "$1"; else fail "$1" "expected $2, got '$3'"; fi
+}
+
+# 로컬 서버용 curl. 환경에 http_proxy가 있으면 127.0.0.1 요청도 프록시로 가서 막히므로 끈다
+curl_local() { timeout 5 curl --noproxy '*' -s "$@"; }
