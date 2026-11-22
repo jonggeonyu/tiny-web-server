@@ -6,7 +6,7 @@
   - 각 모듈 헤더(`*.h`)에 있는 공개 함수의 모양(이름, 인자, 반환값의 뜻)과 공개 구조체
   - `src/server_limits.h`의 자원 한도 상수 (시스템 헤더 `<limits.h>`와 이름이 겹치지 않게 했다) (요구분석 N3)
   - `Makefile` 타깃 이름: `all`, `test`, `e2e`, `asan`, `tsan`, `clean`
-  - `tests/` 공용 도우미 (`tests/test.h`의 assert 매크로, `tests/e2e/lib.sh`)
+  - `tests/` 공용 도우미 (`tests/unit/test.h`의 assert 매크로, `tests/e2e/lib.sh`)
 - 남의 담당 테스트가 틀려 보이면 직접 고치지 말고 그 담당에게 알린다.
 - 규칙의 근거는 요구사항 분석 문서(F1~F22, N1~N10)다. 문서와 다르게 구현해야 하면 문서부터 고친다.
 - 외부 HTTP·이벤트 루프 라이브러리(libevent, libuv 등)는 쓰지 않는다. 표준 C 라이브러리와 POSIX API만 쓴다.
@@ -76,7 +76,7 @@
 
 ### 7. 파일 배치
 
-- 모듈 하나 = `src/<모듈>.h` + `src/<모듈>.c`: `net`, `rio`, `pool`, `http`, `files`(정적 파일. `static`은 C 키워드라 피함), `cgi`, `router`, `proxy`, `log`
+- 모듈 하나 = `src/<모듈>.h` + `src/<모듈>.c`: `net`, `rio`, `connection`(연결 하나 처리: 요청 읽기 → 응답), `pool`, `http`, `files`(정적 파일. 요구분석 문서의 `static` 모듈인데, `static`은 C 키워드라 이름을 바꿈), `cgi`, `router`, `proxy`, `log`
 - 헤더에는 공개 함수·타입만 둔다. `static` 함수나 내부 구조체를 헤더에 두지 않는다.
 - 헤더는 include guard를 쓴다: `#ifndef HTTP_H` / `#define HTTP_H`
 - `.c` 파일은 위에서부터 큰 흐름 → 세부 순서로 내려가게 둔다.
