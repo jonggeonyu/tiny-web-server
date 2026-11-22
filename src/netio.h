@@ -17,6 +17,13 @@
  * 반환: 읽은 바이트 수(>0), 0 = 상대가 연결을 닫음(EOF), -1 = 에러(errno 설정) */
 ssize_t net_read(int fd, void *buf, size_t len);
 
+/* net_read 와 같지만 최대 timeout_ms 동안만 기다린다.
+ * 시간 안에 아무것도 안 오면 -1 + errno = ETIMEDOUT */
+ssize_t net_read_timeout(int fd, void *buf, size_t len, int timeout_ms);
+
+/* 시계를 바꿔도 영향 없는 "흐른 시간" (밀리초). 시간 제한 계산용 */
+long long net_now_ms(void);
+
 /* len 바이트를 "전부" 쓸 때까지 반복한다. EINTR 이면 자동 재시도.
  * 반환: 0 = 전부 씀, -1 = 에러(errno 설정. 예: EPIPE = 상대가 이미 끊음) */
 int net_write_all(int fd, const void *buf, size_t len);

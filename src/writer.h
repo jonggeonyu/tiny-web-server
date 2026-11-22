@@ -42,6 +42,10 @@ void writer_init(http_writer *w, int fd);
 /* 헤더 추가. send_head 전에만 가능. 반환: 0 성공, -1 공간 없음 */
 int writer_add_header(http_writer *w, const char *name, const char *value);
 
+/* "HTTP/1.1 100 Continue" 중간 응답 전송 (Expect: 100-continue 에 대한 "본문 보내도 좋아" 신호).
+ * 최종 응답이 아니므로 status 는 그대로 0 이고, 이후 진짜 응답을 보내야 한다. 반환: 0 / -1 */
+int writer_send_continue(http_writer *w);
+
 /* 응답 머리 전송. content_type 이 NULL 이면 Content-Type 생략. 반환: 0 / -1 */
 int writer_send_head(http_writer *w, int status, const char *content_type,
                      long long content_length);

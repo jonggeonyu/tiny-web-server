@@ -53,6 +53,18 @@ static size_t build_head(http_writer *w, int status, const char *content_type,
     return h.error ? 0 : h.len;
 }
 
+int writer_send_continue(http_writer *w)
+{
+    if (w->status != 0 || w->failed)
+        return -1; /* 최종 응답을 이미 보냈다면 의미 없음 */
+    static const char msg[] = "HTTP/1.1 100 Continue\r\n\r\n";
+    if (net_write_all(w->fd, msg, sizeof(msg) - 1) < 0) {
+        w->failed = 1;
+        return -1;
+    }
+    return 0;
+}
+
 int writer_send_head(http_writer *w, int status, const char *content_type,
                      long long content_length)
 {

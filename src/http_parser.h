@@ -62,6 +62,12 @@ typedef struct {
     const char *error_reason;  /* 로그/테스트용 짧은 설명 */
 } http_request;
 
+/* 요청 본문. conn 이 Content-Length 만큼 읽어서 채운다 (data 는 malloc, conn 이 free) */
+typedef struct {
+    char *data;
+    size_t len;
+} http_body;
+
 /* buf[0..len) 를 HTTP 요청으로 해석한다. len 이 HTTP_HEAD_MAX 를 넘어도 앞부분만 본다. */
 http_parse_result http_parse_request(const char *buf, size_t len, http_request *req);
 

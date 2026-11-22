@@ -111,6 +111,8 @@ static void test_keep_alive_policy(void)
     CHECK_EQ_INT(http_keep_alive_after(405, 1, 1), 1);
     /* 요청 자체 문제 / 서버 문제 → 닫기 */
     CHECK_EQ_INT(http_keep_alive_after(400, 1, 1), 0);
+    CHECK_EQ_INT(http_keep_alive_after(408, 1, 1), 0);
+    CHECK_EQ_INT(http_keep_alive_after(417, 1, 1), 0);
     CHECK_EQ_INT(http_keep_alive_after(413, 1, 1), 0);
     CHECK_EQ_INT(http_keep_alive_after(414, 1, 1), 0);
     CHECK_EQ_INT(http_keep_alive_after(431, 1, 1), 0);

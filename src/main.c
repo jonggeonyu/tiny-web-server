@@ -1,7 +1,7 @@
 /*
  * tiny-web-server 진입점: 명령줄 인자 해석, 시그널 설정, 서버 시작.
  *
- *   ./build/tiny -p 8080 -r ./www
+ *   ./build/tiny -p 8080 -r ./www [-T 유휴시간(초)]
  */
 #include "config.h"
 #include "server.h"
@@ -19,9 +19,11 @@
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트]\n", prog);
+    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트] [-T 초]\n", prog);
     fprintf(stderr, "  -p 포트   듣는 포트 번호 (1~65535, 기본값 %d)\n", DEFAULT_PORT);
     fprintf(stderr, "  -r 루트   정적 파일 루트 디렉토리 (기본값 %s)\n", DEFAULT_ROOT);
+    fprintf(stderr, "  -T 초     클라이언트가 아무것도 안 보낼 때 기다리는 최대 시간 (기본값 %d)\n",
+            DEFAULT_IDLE_TIMEOUT_MS / 1000);
 }
 
 /* 문자열을 포트 번호로 변환. 숫자가 아니거나 범위를 벗어나면 -1 */
@@ -55,10 +57,12 @@ int main(int argc, char **argv)
 {
     static server_config cfg; /* 프로그램이 끝날 때까지 살아 있어야 하므로 static */
     cfg.port = DEFAULT_PORT;
+    cfg.idle_timeout_ms = DEFAULT_IDLE_TIMEOUT_MS;
+    cfg.request_timeout_ms = DEFAULT_REQUEST_TIMEOUT_MS;
     const char *root_arg = DEFAULT_ROOT;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:r:h")) != -1) {
+    while ((opt = getopt(argc, argv, "p:r:T:h")) != -1) {
         switch (opt) {
         case 'p':
             cfg.port = parse_port(optarg);
@@ -70,6 +74,15 @@ int main(int argc, char **argv)
         case 'r':
             root_arg = optarg;
             break;
+        case 'T': {
+            int sec = parse_port(optarg); /* 1~65535 범위의 양의 정수 검사를 재사용 */
+            if (sec < 0 || sec > 3600) {
+                fprintf(stderr, "잘못된 시간(초): %s\n", optarg);
+                return 1;
+            }
+            cfg.idle_timeout_ms = sec * 1000;
+            break;
+        }
         case 'h':
             usage(argv[0]);
             return 0;

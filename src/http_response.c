@@ -13,8 +13,10 @@ const char *http_status_text(int status)
     case 403: return "Forbidden";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 408: return "Request Timeout";
     case 413: return "Content Too Large";
     case 414: return "URI Too Long";
+    case 417: return "Expectation Failed";
     case 431: return "Request Header Fields Too Large";
     case 500: return "Internal Server Error";
     case 501: return "Not Implemented";
@@ -130,9 +132,11 @@ int http_keep_alive_after(int status, int parsed_ok, int client_keep_alive)
     if (!client_keep_alive)
         return 0;
 
-    /* 3) 요청 자체가 문제였거나(400/413/414/431) 서버 상태가 불확실(5xx) → 안전하게 닫는다.
-     *    413 은 본문을 읽지 않고 거절했으므로 그 본문이 아직 소켓에 남아 있다. */
-    if (status == 400 || status == 413 || status == 414 || status == 431 || status >= 500)
+    /* 3) 요청 자체가 문제였거나(400/408/413/414/417/431) 서버 상태가 불확실(5xx) → 안전하게 닫는다.
+     *    413/417 은 본문을 읽지 않고 거절했으므로 그 본문이 아직 소켓에 남아 있을 수 있다.
+     *    408 은 클라이언트가 너무 느렸다 → 더 기다려 줄 이유가 없다. */
+    if (status == 400 || status == 408 || status == 413 || status == 414 || status == 417 ||
+        status == 431 || status >= 500)
         return 0;
 
     /* 4) 200, 403, 404, 405 처럼 요청은 멀쩡했고 결과만 다른 경우 → 유지 가능 */

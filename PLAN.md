@@ -43,8 +43,9 @@ tiny-web-server/
 │   ├── mime.c/.h         # 확장자 → Content-Type
 │   │
 │   │   ── 처리기(handler) 계층 ──
-│   ├── router.c/.h       # 요청 → 어떤 handler로 보낼지 결정
+│   ├── router.c/.h       # 요청 → 어떤 handler로 보낼지 + 본문이 필요한지 결정
 │   ├── handler_static.c/.h
+│   ├── handler_echo.c/.h # POST /echo: 본문을 그대로 돌려줌 (본문 읽기 확인용)
 │   ├── handler_cgi.c/.h
 │   └── log.c/.h          # 스레드 안전 로그 (접속 로그, 에러 로그)
 ├── tests/
@@ -54,6 +55,8 @@ tiny-web-server/
 │   ├── test_path.c
 │   ├── test_mime.c
 │   ├── test_router.c
+│   ├── test_static.c     # 임시 디렉토리 + 심볼릭 링크로 정적 파일 처리기 검사
+│   ├── test_conn.c       # socketpair + 스레드로 연결 전체 흐름 검사 (본문, 100-continue, 타임아웃)
 │   └── e2e.sh            # curl 기반 기능 테스트 스크립트 (서버 띄워서 확인)
 ├── www/                  # 테스트용 정적 파일 (index.html, style.css, app.js, img.png, img.jpg, secret.txt(권한 000))
 ├── cgi-bin/              # 테스트용 CGI (hello.sh, echo_post.sh, env.sh, slow.sh, adder.c)
