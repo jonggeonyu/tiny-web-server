@@ -187,7 +187,7 @@ main → server → threadpool → conn → router → handler_static / handler_
   curl -s http://localhost:8080/img.png | cmp - www/img.png && echo SAME   # 바이너리 동일
   curl -i http://localhost:8080/nope.html                # 404
   curl -i --path-as-is http://localhost:8080/../PROJECT.md   # 403
-  curl -i http://localhost:8080/%2e%2e/PROJECT.md        # 403
+  curl -i --path-as-is http://localhost:8080/%2e%2e/PROJECT.md   # 403 (curl 이 미리 정리하지 않게)
   curl -i http://localhost:8080/secret.txt               # 403 (권한 000)
   ```
   브라우저로 `index.html` 열어 CSS/JS/이미지가 모두 로드되는지 확인.

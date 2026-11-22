@@ -4,6 +4,7 @@
 #include "http_parser.h"
 #include "http_response.h"
 #include "netio.h"
+#include "handler_static.h"
 #include "path.h"
 #include "writer.h"
 
@@ -44,8 +45,9 @@ static int read_and_parse(int fd, char *buf, size_t cap, size_t *used, http_requ
     }
 }
 
-/* 요청 처리 (Step 4: 경로 검사 후 고정 응답). 결과는 writer 에 기록된다. */
-static void handle_request(const http_request *req, http_writer *w)
+/* 요청 처리: 경로 검사 후 정적 파일 응답. 결과는 writer 에 기록된다.
+ * (Step 7에서 CGI 가 추가되면 이 부분이 router 로 분리된다) */
+static void handle_request(const http_request *req, http_writer *w, const server_config *cfg)
 {
     char path[HTTP_URI_MAX + 1];
     switch (path_decode_normalize(req->path, path, sizeof(path))) {
@@ -55,6 +57,7 @@ static void handle_request(const http_request *req, http_writer *w)
         writer_send_error(w, 400);
         return;
     case PATH_ESCAPES_ROOT:
+        w->note = "../ 로 루트 위로 올라가려 함";
         writer_send_error(w, 403);
         return;
     case PATH_TOO_LONG:
@@ -62,12 +65,10 @@ static void handle_request(const http_request *req, http_writer *w)
         return;
     }
 
-    /* 아직은 고정 응답 (Step 5에서 정적 파일로 바뀜) */
-    const char *body = "Hello, world!\n";
-    writer_send_all(w, 200, "text/plain; charset=utf-8", body, strlen(body));
+    static_serve(cfg->root, req, path, w);
 }
 
-void conn_handle(int client_fd)
+void conn_handle(int client_fd, const server_config *cfg)
 {
     char buf[HTTP_HEAD_MAX];
     size_t used = 0;
@@ -97,16 +98,17 @@ void conn_handle(int client_fd)
         printf("  → %d %s (%s)\n", w.status, http_status_text(w.status), req->error_reason);
     } else if (parsed_ok) {
         w.head_only = (strcmp(req->method, "HEAD") == 0);
-        handle_request(req, &w);
+        handle_request(req, &w, cfg);
 
-        printf("  \"%s %s HTTP/%d.%d\" → %d %s (본문 %lld바이트%s)\n", req->method,
+        printf("  \"%s %s HTTP/%d.%d\" → %d %s (본문 %lld바이트%s)%s%s\n", req->method,
                req->target, req->version_major, req->version_minor, w.status,
-               http_status_text(w.status), w.body_len, w.head_only ? ", HEAD 라서 생략" : "");
+               http_status_text(w.status), w.body_len, w.head_only ? ", HEAD 라서 생략" : "",
+               w.note ? " - " : "", w.note ? w.note : "");
     }
     fflush(stdout);
 
     if (w.failed)
-        fprintf(stderr, "  응답 전송 실패: %s\n", strerror(errno));
+        fprintf(stderr, "  응답이 중간에 끊김 (클라이언트 종료 또는 파일 읽기 실패) → 연결 닫음\n");
 
     /* 클라이언트가 보낸 데이터가 아직 남아 있을 수 있으면 부드럽게 닫는다:
      *  - 파싱 에러(요청 끝을 모름), 본문이 있는 요청(본문 읽기는 Step 6) */

@@ -33,7 +33,8 @@ typedef struct {
     /* 결과 (로그용) */
     int status;             /* 보낸 상태 코드, 아직 안 보냈으면 0 */
     long long body_len;     /* Content-Length 로 알린 본문 길이 */
-    int failed;             /* 전송 실패 (클라이언트가 끊음 등) */
+    int failed;             /* 전송 실패 (클라이언트가 끊음, 파일이 중간에 줄어듦 등) → 연결을 닫아야 함 */
+    const char *note;       /* 로그에 남길 짧은 이유 (예: "심볼릭 링크가 루트 밖"). 없으면 NULL */
 } http_writer;
 
 void writer_init(http_writer *w, int fd);

@@ -59,7 +59,7 @@ int server_listen(int port)
     return fd;
 }
 
-void server_run(int listen_fd)
+void server_run(int listen_fd, const server_config *cfg)
 {
     for (;;) {
         struct sockaddr_in peer;
@@ -81,7 +81,7 @@ void server_run(int listen_fd)
         printf("[연결] %s:%d\n", ip, peer_port);
         fflush(stdout);
 
-        conn_handle(client_fd); /* 요청 읽기 → 응답 → client_fd 닫기까지 담당 */
+        conn_handle(client_fd, cfg);/* 요청 읽기 → 응답 → client_fd 닫기까지 담당 */
 
         printf("[종료] %s:%d\n", ip, peer_port);
         fflush(stdout);

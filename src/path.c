@@ -90,3 +90,14 @@ path_result path_decode_normalize(const char *raw, char *out, size_t cap)
     *w = '\0';
     return PATH_OK;
 }
+
+int path_is_inside(const char *root, const char *p)
+{
+    size_t n = strlen(root);
+    if (n == 1 && root[0] == '/')
+        return p[0] == '/'; /* 루트가 "/" 이면 모든 절대 경로가 안쪽 */
+    if (strncmp(p, root, n) != 0)
+        return 0;
+    /* 앞부분이 같으면, 바로 다음 글자가 끝이거나 '/' 여야 진짜 안쪽이다 */
+    return p[n] == '\0' || p[n] == '/';
+}

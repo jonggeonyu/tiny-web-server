@@ -80,8 +80,23 @@ static void test_too_long(void)
     CHECK_EQ_STR(small, "/ab");
 }
 
+static void test_is_inside(void)
+{
+    CHECK_EQ_INT(path_is_inside("/srv/www", "/srv/www"), 1);
+    CHECK_EQ_INT(path_is_inside("/srv/www", "/srv/www/a.html"), 1);
+    CHECK_EQ_INT(path_is_inside("/srv/www", "/srv/www/a/b/c"), 1);
+    CHECK_EQ_INT(path_is_inside("/srv/www", "/srv"), 0);
+    CHECK_EQ_INT(path_is_inside("/srv/www", "/etc/passwd"), 0);
+    /* 앞부분 글자만 같은 함정: "/srv/www2" 는 "/srv/www" 안이 아니다 */
+    CHECK_EQ_INT(path_is_inside("/srv/www", "/srv/www2"), 0);
+    CHECK_EQ_INT(path_is_inside("/srv/www", "/srv/www2/secret"), 0);
+    CHECK_EQ_INT(path_is_inside("/srv/www", "/srv/www-backup/x"), 0);
+    CHECK_EQ_INT(path_is_inside("/", "/anything"), 1);
+}
+
 int main(void)
 {
+    RUN_TEST(test_is_inside);
     RUN_TEST(test_plain);
     RUN_TEST(test_normalize);
     RUN_TEST(test_decode);

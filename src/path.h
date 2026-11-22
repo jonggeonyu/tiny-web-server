@@ -23,4 +23,9 @@ typedef enum {
  * 끝의 '/' 는 유지한다 ("/dir/" 는 디렉토리 요청이라는 뜻이므로). */
 path_result path_decode_normalize(const char *raw, char *out, size_t cap);
 
+/* p 가 root 와 같거나 root 안쪽에 있는가? (둘 다 realpath 로 얻은 절대 경로)
+ * 단순히 앞부분이 같은지만 보면 안 된다: root "/srv/www" 와 "/srv/www2/x" 는 앞부분이 같지만 바깥이다.
+ * 반환: 1 = 안쪽, 0 = 바깥 */
+int path_is_inside(const char *root, const char *p);
+
 #endif /* PATH_H */
