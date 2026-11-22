@@ -4,7 +4,7 @@
 
 - 아래 공용 약속은 팀 합의 없이 바꾸지 않는다. 바꿔야 할 것 같으면 먼저 팀에 공유한다.
   - 각 모듈 헤더(`*.h`)에 있는 공개 함수의 모양(이름, 인자, 반환값의 뜻)과 공개 구조체
-  - `include/limits.h`의 자원 한도 상수 (요구분석 N3)
+  - `src/server_limits.h`의 자원 한도 상수 (시스템 헤더 `<limits.h>`와 이름이 겹치지 않게 했다) (요구분석 N3)
   - `Makefile` 타깃 이름: `all`, `test`, `e2e`, `asan`, `tsan`, `clean`
   - `tests/` 공용 도우미 (`tests/test.h`의 assert 매크로, `tests/e2e/lib.sh`)
 - 남의 담당 테스트가 틀려 보이면 직접 고치지 말고 그 담당에게 알린다.
@@ -30,7 +30,7 @@
 - `_t`로 끝나는 이름은 POSIX 예약이라 쓰지 않는다.
 - 상수와 매크로는 `UPPER_SNAKE_CASE`: `MAX_HEADER_BYTES`, `KEEPALIVE_IDLE_SEC`
 - 열거형 값도 `UPPER_SNAKE_CASE`에 모듈 접두사를 붙인다: `HTTP_GET`, `HTTP_POST`
-- 숫자를 코드에 바로 쓰지 않는다. 한도·크기·시간은 `limits.h` 상수를 쓴다 (예외: 0, 1, -1).
+- 숫자를 코드에 바로 쓰지 않는다. 한도·크기·시간은 `server_limits.h` 상수를 쓴다 (예외: 0, 1, -1).
 
 ### 3. 함수 크기
 
@@ -62,7 +62,7 @@
   - 예: `accept`한 `connfd`는 큐에 넣는 순간 워커 소유가 되고, 워커가 `close`한다.
 - 자원이 두 개 이상인 함수는 `goto cleanup` 한 곳에서 거꾸로 정리한다. 중간 `return`으로 빠져나가며 정리를 빼먹지 않는다.
   - `goto`는 아래로만 뛰고, 목적지는 함수 끝의 `cleanup:` 하나뿐이다. 다른 용도로는 쓰지 않는다.
-- 클라이언트가 보낸 값으로 `malloc` 크기를 정하지 않는다. 버퍼는 `limits.h` 크기로 고정하고, 넘으면 413/414/431로 끊는다.
+- 클라이언트가 보낸 값으로 `malloc` 크기를 정하지 않는다. 버퍼는 `server_limits.h` 크기로 고정하고, 넘으면 413/414/431로 끊는다.
 - 문자열 함수는 길이를 받는 것만 쓴다: `snprintf`, `strncmp`, `memcpy`. `sprintf`, `strcpy`, `strcat`, `gets`는 쓰지 않는다.
 - 읽기만 하는 포인터 인자에는 `const`를 붙인다. 인자로 받은 버퍼를 고치는 함수는 헤더에 그렇게 적는다.
 
