@@ -1,6 +1,6 @@
 #include "server.h"
 
-#include "netio.h"
+#include "conn.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -59,29 +59,7 @@ int server_listen(int port)
     return fd;
 }
 
-/* 연결 하나를 처리: 상대가 닫을 때까지 받은 것을 그대로 돌려준다 */
-static void echo_client(int client_fd)
-{
-    char buf[4096];
-
-    for (;;) {
-        ssize_t n = net_read(client_fd, buf, sizeof(buf));
-        if (n == 0)
-            break; /* 상대가 연결을 닫음 */
-        if (n < 0) {
-            fprintf(stderr, "read 실패: %s\n", strerror(errno));
-            break;
-        }
-        if (net_write_all(client_fd, buf, (size_t)n) < 0) {
-            /* EPIPE 등: 상대가 이미 끊었다. SIGPIPE 를 무시해 두었기 때문에
-             * 서버가 죽지 않고 여기로 에러가 돌아온다. */
-            fprintf(stderr, "write 실패: %s\n", strerror(errno));
-            break;
-        }
-    }
-}
-
-void server_run_echo(int listen_fd)
+void server_run(int listen_fd)
 {
     for (;;) {
         struct sockaddr_in peer;
@@ -103,9 +81,8 @@ void server_run_echo(int listen_fd)
         printf("[연결] %s:%d\n", ip, peer_port);
         fflush(stdout);
 
-        echo_client(client_fd);
+        conn_handle(client_fd); /* 요청 읽기 → 응답 → client_fd 닫기까지 담당 */
 
-        close(client_fd); /* 다 쓴 소켓은 반드시 닫는다 (안 닫으면 fd 가 새어 나간다) */
         printf("[종료] %s:%d\n", ip, peer_port);
         fflush(stdout);
     }

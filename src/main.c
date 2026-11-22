@@ -1,7 +1,7 @@
 /*
  * tiny-web-server 진입점: 명령줄 인자 해석, 시그널 설정, 서버 시작.
  *
- * Step 1: 에코 서버 (받은 바이트를 그대로 돌려줌)
+ * Step 2: 어떤 요청이든 고정된 HTTP 응답("Hello, world!")을 돌려줌
  *   ./build/tiny -p 8080
  */
 #include "server.h"
@@ -70,10 +70,10 @@ int main(int argc, char **argv)
     if (listen_fd < 0)
         return 1;
 
-    printf("에코 서버 시작: 포트 %d (종료: Ctrl+C)\n", port);
+    printf("서버 시작: http://localhost:%d (종료: Ctrl+C)\n", port);
     fflush(stdout);
 
-    server_run_echo(listen_fd);
+    server_run(listen_fd);
 
     close(listen_fd);
     return 0;
