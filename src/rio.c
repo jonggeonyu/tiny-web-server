@@ -11,28 +11,6 @@ static ssize_t read_buffered(Rio *rio, char *out, size_t n);
  * 공개: 헤더에 선언된 함수. 모양을 바꾸려면 팀과 먼저 정한다.
  * ------------------------------------------------------------------------- */
 
-ssize_t rio_readn(int fd, void *out, size_t n)
-{
-    char *cursor = out;
-    size_t remaining = n;
-
-    while (remaining > 0) {
-        ssize_t got = read(fd, cursor, remaining);
-        if (got < 0 && errno == EINTR) {
-            continue;
-        }
-        if (got < 0) {
-            return -1;
-        }
-        if (got == 0) {
-            break;
-        }
-        remaining -= (size_t)got;
-        cursor += got;
-    }
-    return (ssize_t)(n - remaining);
-}
-
 ssize_t rio_writen(int fd, const void *data, size_t n)
 {
     const char *cursor = data;

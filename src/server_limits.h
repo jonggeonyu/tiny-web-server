@@ -25,6 +25,26 @@
 #define LINGER_DRAIN_BYTES (64 * 1024)
 #define LINGER_TIMEOUT_SEC 1
 
+/* 요청 라인의 버전 토큰 ("HTTP/1.1") 버퍼 */
+#define MAX_VERSION_LENGTH 16
+
+/* Content-Length 자릿수 상한. 9자리면 long이 넘치지 않고, MAX_BODY_BYTES보다
+ * 충분히 커서 "숫자지만 너무 큼"을 413으로 바로 끊을 수 있다 */
+#define MAX_CONTENT_LENGTH_DIGITS 9
+
+/* Date 헤더 문자열 버퍼 ("Sat, 21 Nov 2026 13:00:00 GMT"는 29자) */
+#define MAX_DATE_TEXT 64
+
+/* 포트 번호 최댓값 (16비트) */
+#define MAX_PORT_NUMBER 65535
+
+/* accept가 fd·메모리 부족(EMFILE 등)으로 실패하면 이만큼 쉬고 다시 시도한다.
+ * 그동안 들어온 연결은 커널 backlog에서 기다린다. 100ms */
+#define ACCEPT_RETRY_DELAY_NSEC (100L * 1000 * 1000)
+
+/* strerror_r로 만드는 에러 메시지 버퍼 */
+#define MAX_ERROR_TEXT 128
+
 /* 로그에 찍는 클라이언트 주소 문자열 길이 (IPv4 "255.255.255.255", 포트 "65535") */
 #define MAX_HOST_TEXT 64
 #define MAX_PORT_TEXT 8

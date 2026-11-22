@@ -1,5 +1,7 @@
 /* HTTP 요청 파싱과 응답 생성 (F2, F3, F5, N3 일부) */
 #include "http.h"
+#include "rio.h"
+#include "server_limits.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -8,9 +10,6 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
-
-#include "rio.h"
-#include "server_limits.h"
 
 static int split_request_line(const char *line, char *method, char *uri,
                               char *version);
@@ -21,7 +20,7 @@ static HttpMethod find_method(const char *method_text);
 static int parse_version(const char *version, int *minor);
 static char *store_text(HttpRequest *request, const char *text,
                         size_t length);
-static int parse_content_length(const HttpRequest *request, long *out);
+static int parse_content_length(HttpRequest *request);
 static bool is_digits(const char *text);
 static bool decide_keep_alive(const HttpRequest *request);
 static bool has_connection_token(const HttpRequest *request,
@@ -44,7 +43,7 @@ void http_init_request(HttpRequest *request)
 int http_parse_request_line(const char *line, HttpRequest *request)
 {
     char method[MAX_METHOD_LENGTH];
-    char version[MAX_METHOD_LENGTH];
+    char version[MAX_VERSION_LENGTH];
 
     int status = split_request_line(line, method, request->uri, version);
     if (status != 200) {
@@ -57,8 +56,10 @@ int http_parse_request_line(const char *line, HttpRequest *request)
     if (request->uri[0] != '/') {
         return 400;
     }
-    snprintf(request->method_text, sizeof(request->method_text), "%s",
-             method);
+    /* method는 split_request_line에서 MAX_METHOD_LENGTH 미만으로 검사했으므로
+     * 잘릴 일이 없어 반환값을 보지 않는다 */
+    (void)snprintf(request->method_text, sizeof(request->method_text), "%s",
+                   method);
     request->method = find_method(method);
     if (request->method == HTTP_OTHER) {
         return 501;
@@ -115,7 +116,7 @@ int http_finish_headers(HttpRequest *request)
     if (http_find_header(request, "Transfer-Encoding") != NULL) {
         return 501;
     }
-    int status = parse_content_length(request, &request->content_length);
+    int status = parse_content_length(request);
     if (status != 200) {
         return status;
     }
@@ -155,7 +156,6 @@ const char *http_status_reason(int status)
     case 400: return "Bad Request";
     case 403: return "Forbidden";
     case 404: return "Not Found";
-    case 405: return "Method Not Allowed";
     case 408: return "Request Timeout";
     case 411: return "Length Required";
     case 413: return "Content Too Large";
@@ -175,7 +175,7 @@ int http_build_response_head(char *out, size_t out_size, int status,
                              const char *content_type,
                              size_t content_length, bool keep_alive)
 {
-    char date[64];
+    char date[MAX_DATE_TEXT];
 
     if (format_date(date, sizeof(date)) < 0) {
         return -1;
@@ -239,8 +239,14 @@ int http_send_error(int fd, int status)
  * 도우미: 이 파일 안에서만 쓴다. 전부 static.
  * ------------------------------------------------------------------------- */
 
+/* 요청 라인 버전 토큰의 앞부분 ("HTTP/1.1"의 "HTTP/") */
+static const char HTTP_VERSION_PREFIX[] = "HTTP/";
+static const size_t HTTP_VERSION_PREFIX_LENGTH =
+    sizeof(HTTP_VERSION_PREFIX) - 1;
+
 /* "METHOD SP URI SP VERSION CRLF"를 세 칸으로 나눈다. 공백은 정확히 하나씩.
- * uri는 MAX_LINE, method와 version은 MAX_METHOD_LENGTH 크기 버퍼여야 한다. */
+ * uri는 MAX_LINE, method는 MAX_METHOD_LENGTH, version은 MAX_VERSION_LENGTH
+ * 크기 버퍼여야 한다. */
 static int split_request_line(const char *line, char *method, char *uri,
                               char *version)
 {
@@ -268,7 +274,7 @@ static int split_request_line(const char *line, char *method, char *uri,
     if (uri_length == 0 || memchr(uri_start, ' ', uri_length) != NULL) {
         return 400;
     }
-    if (version_length == 0 || version_length >= MAX_METHOD_LENGTH
+    if (version_length == 0 || version_length >= MAX_VERSION_LENGTH
         || memchr(second_space + 1, ' ', version_length) != NULL) {
         return 400;
     }
@@ -334,10 +340,11 @@ static HttpMethod find_method(const char *method_text)
  * 꼴 자체가 틀리면 400 */
 static int parse_version(const char *version, int *minor)
 {
-    if (strncmp(version, "HTTP/", 5) != 0) {
+    if (strncmp(version, HTTP_VERSION_PREFIX,
+                HTTP_VERSION_PREFIX_LENGTH) != 0) {
         return 400;
     }
-    const char *number = version + 5;
+    const char *number = version + HTTP_VERSION_PREFIX_LENGTH;
     if (!isdigit((unsigned char)number[0]) || number[1] != '.'
         || !isdigit((unsigned char)number[2]) || number[3] != '\0') {
         return 400;
@@ -366,9 +373,11 @@ static char *store_text(HttpRequest *request, const char *text,
     return destination;
 }
 
-/* Content-Length가 여러 개면 값이 모두 같아야 한다 (RFC 7230 3.3.2).
- * 숫자가 아니면 400, 한도를 넘으면 413. 없으면 0. */
-static int parse_content_length(const HttpRequest *request, long *out)
+/* Content-Length를 찾아 has_content_length와 content_length를 채운다.
+ * 여러 개면 값이 모두 같아야 한다 (RFC 7230 3.3.2).
+ * 숫자가 아니면 400, 한도를 넘으면 413. 헤더가 없으면 has_content_length는
+ * false, content_length는 0 (POST면 F4에서 411로 처리). */
+static int parse_content_length(HttpRequest *request)
 {
     long found = -1;
 
@@ -377,7 +386,7 @@ static int parse_content_length(const HttpRequest *request, long *out)
             continue;
         }
         const char *value = request->headers[i].value;
-        if (!is_digits(value) || strlen(value) > 9) {
+        if (!is_digits(value) || strlen(value) > MAX_CONTENT_LENGTH_DIGITS) {
             return is_digits(value) ? 413 : 400;
         }
         long parsed = strtol(value, NULL, 10);
@@ -389,7 +398,8 @@ static int parse_content_length(const HttpRequest *request, long *out)
     if (found > MAX_BODY_BYTES) {
         return 413;
     }
-    *out = found < 0 ? 0 : found;
+    request->has_content_length = found >= 0;
+    request->content_length = found < 0 ? 0 : found;
     return 200;
 }
 

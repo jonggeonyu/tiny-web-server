@@ -1,6 +1,7 @@
 /* HTTP/1.x 요청 파싱과 응답 생성 (F2, F3, F5).
  * 파싱 함수는 소켓을 모르고 문자열만 받는다. 그래야 단위 테스트가 쉽다.
- * 반환 약속: 상태 코드. 200이면 성공, 그 외(400, 414 …)는 그 코드로 응답할 것. */
+ * 반환 약속은 함수마다 아래 주석에 적는다. 파싱 함수는 상태 코드를 돌려준다
+ * (200이면 성공, 그 외 400, 414 …는 그 코드로 응답할 것). */
 #ifndef HTTP_H
 #define HTTP_H
 
@@ -33,7 +34,8 @@ typedef struct {
     char header_storage[MAX_HEADER_BYTES];
     size_t header_storage_used;
 
-    long content_length;               /* 본문 길이. 없으면 0 */
+    bool has_content_length;           /* Content-Length 헤더가 있었는지 (411 판단) */
+    long content_length;               /* 본문 길이. 헤더가 없으면 0 */
     bool keep_alive;                   /* 응답 뒤 연결을 유지해도 되는지 */
 } HttpRequest;
 
@@ -48,7 +50,8 @@ int http_parse_request_line(const char *line, HttpRequest *request);
  * 반환: 200, 형식 오류 400, 개수·크기 초과 431 */
 int http_parse_header_line(const char *line, HttpRequest *request);
 
-/* 헤더를 다 받은 뒤 검사하고 content_length, keep_alive를 정한다.
+/* 헤더를 다 받은 뒤 검사하고 has_content_length, content_length,
+ * keep_alive를 정한다.
  * 반환: 200, Host 없음·잘못된 Content-Length 400, 본문 초과 413,
  *       Transfer-Encoding 501 */
 int http_finish_headers(HttpRequest *request);

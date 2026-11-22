@@ -91,14 +91,16 @@ static void test_n6_readnb_after_readlineb_keeps_buffered_bytes(void)
     close(fds[0]);
 }
 
-static void test_n6_readn_returns_short_count_at_eof(void)
+static void test_n6_readnb_returns_short_count_at_eof(void)
 {
+    Rio rio;
     int fds[2];
     char out[16];
     CHECK(pipe(fds) == 0);
     write_all(fds[1], "abc");
     close(fds[1]);
-    CHECK(rio_readn(fds[0], out, sizeof(out)) == 3);
+    rio_readinitb(&rio, fds[0]);
+    CHECK(rio_readnb(&rio, out, sizeof(out)) == 3);
     close(fds[0]);
 }
 
@@ -108,7 +110,7 @@ int main(void)
     RUN(test_n6_readlineb_joins_split_arrival);
     RUN(test_n6_readlineb_truncates_long_line);
     RUN(test_n6_readnb_after_readlineb_keeps_buffered_bytes);
-    RUN(test_n6_readn_returns_short_count_at_eof);
+    RUN(test_n6_readnb_returns_short_count_at_eof);
     printf("rio: %d checks, %d failed\n", test_checks, test_failures);
     return TEST_EXIT_CODE();
 }

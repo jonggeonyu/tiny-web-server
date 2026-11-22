@@ -15,10 +15,6 @@ typedef struct {
     char buffer[RIO_BUFFER_SIZE];
 } Rio;
 
-/* 버퍼 없이 정확히 n바이트를 읽는다. EOF를 만나면 그때까지 읽은 수.
- * 반환: 읽은 바이트 수 (EOF면 n보다 작을 수 있음), 실패 -1 */
-ssize_t rio_readn(int fd, void *out, size_t n);
-
 /* 정확히 n바이트를 쓴다. 반환: n, 실패 -1 (errno 유지, EPIPE 포함) */
 ssize_t rio_writen(int fd, const void *data, size_t n);
 
@@ -30,7 +26,8 @@ void rio_readinitb(Rio *rio, int fd);
  * 반환: 읽은 바이트 수, EOF면 0, 실패 -1 */
 ssize_t rio_readlineb(Rio *rio, char *out, size_t max_length);
 
-/* 버퍼를 거쳐 최대 n바이트를 읽는다. 반환은 rio_readn과 같다. */
+/* 버퍼를 거쳐 정확히 n바이트를 읽는다. EOF를 만나면 그때까지 읽은 수.
+ * 반환: 읽은 바이트 수 (EOF면 n보다 작을 수 있음), 실패 -1 */
 ssize_t rio_readnb(Rio *rio, void *out, size_t n);
 
 #endif

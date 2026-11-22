@@ -1,5 +1,6 @@
 /* listen 소켓 열기 (F1) */
 #include "net.h"
+#include "server_limits.h"
 
 #include <errno.h>
 #include <netdb.h>
@@ -10,12 +11,11 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "server_limits.h"
-
 static int bind_first_address(const struct addrinfo *candidates,
                               const char *port);
 static int open_bound_socket(const struct addrinfo *address);
 static void close_keeping_errno(int fd);
+static const char *format_errno(int error, char *out, size_t out_size);
 
 /* ---------------------------------------------------------------------------
  * 공개: 헤더에 선언된 함수. 모양을 바꾸려면 팀과 먼저 정한다.
@@ -47,10 +47,12 @@ int net_open_listenfd(const char *port)
     }
 
     if (listen(listenfd, LISTEN_BACKLOG) < 0) {
+        char message[MAX_ERROR_TEXT];
         int saved_errno = errno;
         fprintf(stderr, "error: listen port %s: %s\n",
-                port, strerror(saved_errno));
-        close(listenfd);
+                port, format_errno(saved_errno, message, sizeof(message)));
+        /* 이미 실패를 처리하는 중이라 close 실패는 따로 다루지 않는다 */
+        (void)close(listenfd);
         return -1;
     }
     return listenfd;
@@ -68,7 +70,7 @@ bool net_is_valid_port(const char *port)
     if (errno != 0 || *end != '\0') {
         return false;
     }
-    return value >= 1 && value <= 65535;
+    return value >= 1 && value <= MAX_PORT_NUMBER;
 }
 
 /* ---------------------------------------------------------------------------
@@ -80,6 +82,7 @@ bool net_is_valid_port(const char *port)
 static int bind_first_address(const struct addrinfo *candidates,
                               const char *port)
 {
+    char message[MAX_ERROR_TEXT];
     int last_errno = 0;
 
     for (const struct addrinfo *address = candidates; address != NULL;
@@ -91,7 +94,7 @@ static int bind_first_address(const struct addrinfo *candidates,
         last_errno = errno;
     }
     fprintf(stderr, "error: bind 0.0.0.0:%s: %s\n",
-            port, strerror(last_errno));
+            port, format_errno(last_errno, message, sizeof(message)));
     return -1;
 }
 
@@ -122,6 +125,18 @@ static int open_bound_socket(const struct addrinfo *address)
 static void close_keeping_errno(int fd)
 {
     int saved_errno = errno;
-    close(fd);
+    /* 이미 실패를 처리하는 중이라 close 실패는 따로 다루지 않는다 */
+    (void)close(fd);
     errno = saved_errno;
+}
+
+/* errno 값을 메시지로 바꿔 out에 넣고 out을 돌려준다.
+ * strerror는 스레드 안전하지 않아 strerror_r(POSIX 버전)을 쓴다 */
+static const char *format_errno(int error, char *out, size_t out_size)
+{
+    if (strerror_r(error, out, out_size) != 0) {
+        /* 메시지를 못 찾아도 번호는 남긴다. 로그용이라 잘려도 괜찮다 */
+        (void)snprintf(out, out_size, "errno %d", error);
+    }
+    return out;
 }
