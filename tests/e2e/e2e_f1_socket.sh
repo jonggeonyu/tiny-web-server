@@ -6,8 +6,17 @@ PORT=18001
 # --- 인자 검사 (F12) ---
 if "$SERVER" >/dev/null 2>&1; then fail "f12_no_port_exits_with_usage"
 else pass "f12_no_port_exits_with_usage"; fi
-if "$SERVER" 99999 >/dev/null 2>&1; then fail "f12_bad_port_exits_with_usage"
+if "$SERVER" 99999 "$WWW" >/dev/null 2>&1; then fail "f12_bad_port_exits_with_usage"
 else pass "f12_bad_port_exits_with_usage"; fi
+if "$SERVER" "$PORT" >/dev/null 2>&1; then fail "f12_no_root_exits_with_usage"
+else pass "f12_no_root_exits_with_usage"; fi
+if "$SERVER" "$PORT" "$TMP/no-such-dir" >"$TMP/badroot.log" 2>&1; then
+    fail "f12_missing_root_exits"
+elif grep -q "error: root" "$TMP/badroot.log"; then
+    pass "f12_missing_root_exits"
+else
+    fail "f12_missing_root_exits" "$(cat "$TMP/badroot.log")"
+fi
 
 start_server "$PORT" || { fail "f1_server_starts"; exit 1; }
 pass "f1_server_starts"
@@ -18,12 +27,12 @@ reply=$(raw_request "$PORT" 'GET / HTTP/1.0\r\n\r\n')
 expect_status "f1_accept_and_reply" 200 "$(status_of "$reply")"
 
 # --- 요청을 1바이트씩 나눠 보내도 하나의 요청으로 처리 (N6) ---
-printf -v request 'GET /split HTTP/1.0\r\n\r\n'   # $( ) 는 끝 줄바꿈을 지워서 쓰지 않음
+printf -v request 'GET /split.txt HTTP/1.0\r\n\r\n'   # $( ) 는 끝 줄바꿈을 지워서 쓰지 않음
 reply=$( (for ((i = 0; i < ${#request}; i++)); do
             printf '%s' "${request:i:1}"; sleep 0.01; done) \
          | timeout 5 nc -N 127.0.0.1 "$PORT")
 expect_status "n6_split_bytes_one_request" 200 "$(status_of "$reply")"
-printf '%s' "$reply" | grep -q "uri: /split" \
+printf '%s' "$reply" | grep -q "split ok" \
     && pass "n6_split_bytes_uri_intact" || fail "n6_split_bytes_uri_intact"
 
 # --- 클라이언트가 보내다 끊어도 서버 생존 (N5) ---
@@ -43,7 +52,7 @@ FDS_AFTER=$(wait_fds "$FDS_BEFORE")
     || fail "n7_no_fd_leak" "before $FDS_BEFORE after $FDS_AFTER"
 
 # --- 같은 포트로 두 번 띄우면 에러 메시지 후 종료 (F1) ---
-if "$SERVER" "$PORT" >"$TMP/second.log" 2>&1; then
+if "$SERVER" "$PORT" "$WWW" >"$TMP/second.log" 2>&1; then
     fail "f1_same_port_twice_fails"
 elif grep -q "Address already in use" "$TMP/second.log"; then
     pass "f1_same_port_twice_fails"

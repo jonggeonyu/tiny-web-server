@@ -5,13 +5,12 @@ PORT=18002
 
 start_server "$PORT" || { fail "server_starts"; exit 1; }
 
-# --- 정상 요청 (curl) ---
-headers=$(curl_local -D - -o "$TMP/body.txt" "http://127.0.0.1:$PORT/hello?x=1")
+# --- 정상 요청 (curl). 쿼리는 떼고 파일을 찾는다 ---
+printf 'hello\n' >"$WWW/hello.txt"
+headers=$(curl_local -D - -o "$TMP/body.txt" "http://127.0.0.1:$PORT/hello.txt?x=1")
 expect_status "f2_curl_get_200" 200 "$(status_of "$headers")"
-grep -q "uri: /hello?x=1" "$TMP/body.txt" && pass "f2_uri_with_query_parsed" \
+grep -q "^hello$" "$TMP/body.txt" && pass "f2_uri_with_query_parsed" \
     || fail "f2_uri_with_query_parsed"
-grep -q "method: GET" "$TMP/body.txt" && pass "f2_method_parsed" \
-    || fail "f2_method_parsed"
 
 # --- F5 응답 헤더 ---
 for h in "Content-Type: text/plain" "Content-Length: " "Connection: close" "Date: "; do

@@ -42,6 +42,9 @@
  * 그동안 들어온 연결은 커널 backlog에서 기다린다. 100ms */
 #define ACCEPT_RETRY_DELAY_NSEC (100L * 1000 * 1000)
 
+/* 정적 파일 경로 버퍼. realpath 결과와 같은 크기 (Linux PATH_MAX) */
+#define MAX_FILE_PATH 4096
+
 /* strerror_r로 만드는 에러 메시지 버퍼 */
 #define MAX_ERROR_TEXT 128
 

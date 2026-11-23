@@ -16,7 +16,7 @@ endif
 BUILD := build
 BIN   := bin
 
-LIB_SOURCES  := src/rio.c src/net.c src/http.c src/connection.c
+LIB_SOURCES  := src/rio.c src/net.c src/http.c src/files.c src/connection.c
 LIB_OBJECTS  := $(LIB_SOURCES:src/%.c=$(BUILD)/%.o)
 UNIT_SOURCES := $(wildcard tests/unit/test_*.c)
 UNIT_BINS    := $(UNIT_SOURCES:tests/unit/%.c=$(BIN)/%)

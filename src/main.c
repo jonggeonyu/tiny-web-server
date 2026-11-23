@@ -1,22 +1,29 @@
 /* 서버 진입점 (F1, F12 일부, N5). 지금은 반복형(iterative) HTTP 서버다.
  * 한 번에 한 연결만 처리하고, 동시 처리는 스레드 풀 단계(N1, N2)에서 붙인다. */
+
+/* realpath는 POSIX의 XSI 확장이라 이 파일에서만 켠다 */
+#define _XOPEN_SOURCE 700
+
 #include "connection.h"
 #include "net.h"
 #include "server_limits.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 static void print_usage(const char *program);
+static int resolve_root(const char *input, char *out);
 static void ignore_sigpipe(void);
-static void serve_forever(int listenfd);
+static void serve_forever(int listenfd, const char *root);
 static void handle_accept_error(int error);
 static bool is_retryable_accept_error(int error);
 static bool is_resource_shortage(int error);
@@ -32,8 +39,13 @@ static const char *format_errno(int error, char *out, size_t out_size);
 
 int main(int argc, char **argv)
 {
-    if (argc != 2 || !net_is_valid_port(argv[1])) {
+    char root[PATH_MAX];
+
+    if (argc != 3 || !net_is_valid_port(argv[1])) {
         print_usage(argv[0]);
+        return 1;
+    }
+    if (resolve_root(argv[2], root) < 0) {
         return 1;
     }
 
@@ -43,9 +55,9 @@ int main(int argc, char **argv)
     if (listenfd < 0) {
         return 1;
     }
-    fprintf(stderr, "info: listening on 0.0.0.0:%s\n", argv[1]);
+    fprintf(stderr, "info: listening on 0.0.0.0:%s, root %s\n", argv[1], root);
 
-    serve_forever(listenfd);
+    serve_forever(listenfd, root);
     /* 지금은 serve_forever가 돌아오지 않는다. N4(graceful shutdown)에서
      * 루프가 끝나면 여기서 listen 소켓을 닫는다 */
     close_socket(listenfd, "listen socket");
@@ -58,8 +70,30 @@ int main(int argc, char **argv)
 
 static void print_usage(const char *program)
 {
-    fprintf(stderr, "usage: %s <port>\n", program);
+    fprintf(stderr, "usage: %s <port> <root>\n", program);
     fprintf(stderr, "  port: 1-%d\n", MAX_PORT_NUMBER);
+    fprintf(stderr, "  root: directory to serve static files from\n");
+}
+
+/* 정적 루트를 심볼릭 링크와 ".."가 없는 절대 경로로 바꿔 out(PATH_MAX)에
+ * 넣는다. 파일마다 "루트 안인가"를 이 경로와 비교한다 (F8).
+ * 없거나 디렉터리가 아니면 원인을 찍고 -1 */
+static int resolve_root(const char *input, char *out)
+{
+    char message[MAX_ERROR_TEXT];
+    struct stat info;
+
+    if (realpath(input, out) == NULL) {
+        int saved_errno = errno;
+        fprintf(stderr, "error: root %s: %s\n", input,
+                format_errno(saved_errno, message, sizeof(message)));
+        return -1;
+    }
+    if (stat(out, &info) < 0 || !S_ISDIR(info.st_mode)) {
+        fprintf(stderr, "error: root %s: not a directory\n", input);
+        return -1;
+    }
+    return 0;
 }
 
 /* 끊긴 소켓에 write하면 SIGPIPE로 프로세스 전체가 죽는다.
@@ -77,7 +111,7 @@ static void ignore_sigpipe(void)
     }
 }
 
-static void serve_forever(int listenfd)
+static void serve_forever(int listenfd, const char *root)
 {
     for (;;) {
         struct sockaddr_storage client;
@@ -92,7 +126,7 @@ static void serve_forever(int listenfd)
 
         log_connection(&client, client_length);
         /* 실패해도 원인은 connection_serve가 이미 찍었고, 할 일은 닫기뿐이다 */
-        (void)connection_serve(connfd);
+        (void)connection_serve(connfd, root);
         close_socket(connfd, "connection");
     }
 }

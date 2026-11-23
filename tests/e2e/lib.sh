@@ -6,6 +6,13 @@ SERVER="$ROOT/bin/webserver"
 TMP="$ROOT/tests/tmp"
 mkdir -p "$TMP"
 
+# 테스트용 정적 루트. 매번 새로 만든다 (tests/tmp/는 커밋하지 않음)
+WWW="$TMP/www"
+rm -rf "$WWW"
+mkdir -p "$WWW"
+printf '<h1>index</h1>\n' >"$WWW/index.html"
+printf 'split ok\n' >"$WWW/split.txt"
+
 E2E_PASS=0
 E2E_FAIL=0
 SERVER_PID=""
@@ -13,12 +20,13 @@ SERVER_PID=""
 pass() { E2E_PASS=$((E2E_PASS + 1)); echo "PASS $1"; }
 fail() { E2E_FAIL=$((E2E_FAIL + 1)); echo "FAIL $1${2:+: $2}"; }
 
-# start_server <port> : 백그라운드로 띄우고 listen 할 때까지 기다린다
+# start_server <port> [root] : 백그라운드로 띄우고 listen 할 때까지 기다린다.
+# root를 안 주면 $WWW
 start_server() {
     # 지난 실행의 로그가 남아 있으면 "listening"을 미리 찾아버려서, 서버가
     # 뜨기 전에 테스트가 시작된다. 그래서 로그를 먼저 지운다
     rm -f "$TMP/server_$1.log"
-    "$SERVER" "$1" >"$TMP/server_$1.log" 2>&1 &
+    "$SERVER" "$1" "${2:-$WWW}" >"$TMP/server_$1.log" 2>&1 &
     SERVER_PID=$!
     for _ in $(seq 1 50); do
         if grep -q "listening" "$TMP/server_$1.log" 2>/dev/null; then

@@ -3,10 +3,10 @@
 #ifndef CONNECTION_H
 #define CONNECTION_H
 
-/* connfd에서 HTTP 요청 하나를 받아 응답한다.
+/* connfd에서 HTTP 요청 하나를 받아 응답한다. GET은 root 아래 정적 파일로 답한다.
  * connfd는 닫지 않는다 (닫는 건 부른 쪽).
  * 반환: 0, 실패 -1. 실패 원인은 이 함수가 이미 stderr에 찍었으므로
  * 부른 쪽은 errno를 읽지 말고 연결만 닫는다. */
-int connection_serve(int connfd);
+int connection_serve(int connfd, const char *root);
 
 #endif
