@@ -58,6 +58,8 @@ static int peek_state(int fd)
     return 0;
 }
 
+static int g_closed_on_stop; /* 종료할 때 보관 스레드가 닫은 연결 수 (join 뒤에 읽음) */
+
 static void *keepalive_main(void *unused)
 {
     (void)unused;
@@ -85,6 +87,7 @@ static void *keepalive_main(void *unused)
                 close(w[i].fd);
                 release_slot();
             }
+            g_closed_on_stop = nw;
             return NULL;
         }
 
@@ -183,12 +186,12 @@ int keepalive_park(int fd, int served, int timeout_ms)
     return 0;
 }
 
-void keepalive_stop(void)
+int keepalive_stop(void)
 {
     pthread_mutex_lock(&g_lock);
     if (!g_running) {
         pthread_mutex_unlock(&g_lock);
-        return;
+        return 0;
     }
     g_stop = 1;
     pthread_mutex_unlock(&g_lock);
@@ -198,6 +201,7 @@ void keepalive_stop(void)
     pthread_join(g_thread, NULL);
 
     pthread_mutex_lock(&g_lock);
+    int closed = g_closed_on_stop + g_npending;
     for (int i = 0; i < g_npending; i++)
         close(g_pending[i].fd);
     g_npending = 0;
@@ -206,4 +210,5 @@ void keepalive_stop(void)
     pthread_mutex_unlock(&g_lock);
     close(g_wake[0]);
     close(g_wake[1]);
+    return closed;
 }

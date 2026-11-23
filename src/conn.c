@@ -8,10 +8,12 @@
 #include "netio.h"
 #include "path.h"
 #include "router.h"
+#include "server.h"
 #include "threadpool.h"
 #include "writer.h"
 
 #include <arpa/inet.h>
+#include <stdatomic.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -24,6 +26,15 @@
 
 /* 로그 줄 앞에 붙이는 일꾼 번호. 여러 일꾼의 로그가 섞여도 누구 것인지 알 수 있게 */
 #define WTAG "[w%02d] "
+
+/* 처리한 요청 수. 여러 일꾼이 동시에 더하므로 원자적(atomic) 변수:
+ * "읽고 → 1 더하고 → 쓰기"가 중간에 끊기지 않는 한 동작으로 일어나서 자물쇠 없이도 숫자가 틀리지 않는다 */
+static atomic_llong g_requests;
+
+long long conn_total_requests(void)
+{
+    return atomic_load(&g_requests);
+}
 
 /* read_and_parse / read_body 의 특별한 결과 */
 #define CONN_CLOSED  (-1)  /* 클라이언트가 끊음 또는 read 에러 → 응답 없이 닫기 */
@@ -305,7 +316,8 @@ void conn_handle(int client_fd, const server_config *cfg, int served)
         int nth = served + 1; /* 이번 요청이 이 연결의 몇 번째인가 */
         w.parsed_ok = parsed_ok;
         w.client_keep_alive = parsed_ok && req->keep_alive;
-        w.server_keep_alive = (nth < cfg->max_requests);
+        /* 종료 중이면 연결을 유지하지 않는다 → 이번 응답에 Connection: close 를 쓰고 닫는다 */
+        w.server_keep_alive = (nth < cfg->max_requests) && !server_stopping();
         w.ka_timeout_s = cfg->keepalive_timeout_ms / 1000;
         w.ka_max_left = cfg->max_requests - nth;
 
@@ -338,6 +350,8 @@ void conn_handle(int client_fd, const server_config *cfg, int served)
         }
         fflush(stdout);
         served = nth;
+        if (parsed_ok)
+            atomic_fetch_add(&g_requests, 1);
 
         if (w.failed)
             fprintf(stderr, WTAG "응답이 중간에 끊김 (클라이언트가 안 받음/끊음, 파일 읽기 실패) → 연결 닫음\n",

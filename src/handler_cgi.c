@@ -4,9 +4,11 @@
 #include "fdutil.h"
 #include "netio.h"
 #include "path.h"
+#include "threadpool.h"
 
 #include <errno.h>
 #include <poll.h>
+#include <stdatomic.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +24,26 @@
 
 /* 자식에서 한 번 더 닫아 볼 fd 범위의 상한 CHILD_CLOSE_FD_MAX 는 config.h 에 있다
  * (서버가 동시에 여는 fd 수가 그보다 작도록 함께 관리하기 위해) */
+
+/* 일꾼마다 한 칸: 그 일꾼이 지금 실행 중인 CGI 의 pid (없으면 0).
+ * 칸 번호 = 일꾼 번호 (일꾼이 아닌 스레드, 예: 단위 테스트는 0번 칸).
+ * 시그널 처리기가 자물쇠 없이 읽어야 하므로 원자적(atomic) 변수 */
+static atomic_int g_running_cgi[MAX_THREADS + 1];
+
+static atomic_int *my_cgi_slot(void)
+{
+    int id = threadpool_worker_id();
+    return &g_running_cgi[(id >= 0 && id <= MAX_THREADS) ? id : 0];
+}
+
+void cgi_kill_all_running(void)
+{
+    for (int i = 0; i <= MAX_THREADS; i++) {
+        int pid = atomic_load(&g_running_cgi[i]);
+        if (pid > 0)
+            kill(-pid, SIGKILL); /* 음수 = 프로세스 그룹 전체 (CGI 가 띄운 손자까지) */
+    }
+}
 
 typedef enum {
     RUN_OK,
@@ -209,6 +231,7 @@ static run_result run_cgi(const char *script, const char *dir, char **envp,
 
     /* ===== 부모 (서버) ===== */
     setpgid(pid, pid); /* 자식과 같은 일을 부모도: 누가 먼저 실행되든 그룹이 확실히 만들어지게 */
+    atomic_store(my_cgi_slot(), (int)pid); /* "지금 이 CGI 실행 중" 표시 (즉시 종료 때 정리용) */
 
     /* 자식이 쓸 끝은 부모에게 필요 없다. 특히 from_cgi[1] 을 안 닫으면
      * "쓰는 쪽이 아직 열려 있다"고 판단되어 EOF 가 영원히 오지 않는다 */
@@ -305,6 +328,7 @@ static run_result run_cgi(const char *script, const char *dir, char **envp,
         kill(-pid, SIGKILL);
     if (reap_child(pid, result == RUN_OK ? deadline : 0, wstatus) && result == RUN_OK)
         result = RUN_TIMEOUT; /* 출력은 닫았지만 프로세스가 안 끝나서 강제 종료함 */
+    atomic_store(my_cgi_slot(), 0); /* 회수 끝 */
 
     *out = buf;
     *out_len = len;

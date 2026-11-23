@@ -28,7 +28,7 @@ int keepalive_start(threadpool *tp);
  * 반환: 0 = 맡음 (fd 는 이제 보관 스레드 책임), -1 = 못 맡음 (보관 스레드 없음/가득 참 → fd 는 호출자 책임) */
 int keepalive_park(int fd, int served, int timeout_ms);
 
-/* 보관 스레드를 멈추고, 맡고 있던 연결을 모두 닫는다 */
-void keepalive_stop(void);
+/* 보관 스레드를 멈추고, 맡고 있던 연결을 모두 닫는다. 반환: 닫은 연결 수 */
+int keepalive_stop(void);
 
 #endif /* KEEPALIVE_H */

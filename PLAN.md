@@ -266,7 +266,11 @@ main → server → threadpool → conn → router → handler_static / handler_
   ```
 
 ### Step 10. 안정화
-- **종료 처리**: `SIGINT`/`SIGTERM` → 플래그 설정 → accept 루프 탈출 → 큐 정리 → 워커 join → 자원 해제. (`SA_RESTART` 없이 등록해 `accept`가 `EINTR`로 깨어나게)
+- **종료 처리** (10-3): `SIGINT`/`SIGTERM` → 처리기는 플래그 + 깨우기 파이프 쓰기만 (async-signal-safe)
+  → accept 루프(`poll`: 듣기 소켓 + 깨우기 파이프) 탈출 → 듣기 소켓 닫기 → 쉬는 연결 닫기
+  → 처리 중/대기 중 요청 마무리(응답은 `Connection: close`) → 일꾼 join → CGI 자식 확인 → linger 정리 → 요약 출력, 종료 코드 0.
+  - 다른 스레드는 종료 신호를 막아 두고(`pthread_sigmask`) 메인 스레드만 받는다.
+  - 두 번째 신호 → 기다리지 않고 즉시 종료 (실행 중인 CGI 프로세스 그룹은 `kill` 로 정리, 종료 코드 128+신호).
 - **자원 회수**: 클라이언트가 중간에 끊어도 fd/메모리/CGI 자식 프로세스가 남지 않게.
 - **느린 클라이언트**: 헤더를 아주 천천히 보내는 경우 타임아웃으로 정리.
 - **검사**

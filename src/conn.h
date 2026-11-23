@@ -11,6 +11,9 @@
  * 끝날 때 client_fd 는 닫히거나(close/linger) 보관 스레드에 맡겨진다 — 어느 쪽이든 호출자는 손대지 않는다. */
 void conn_handle(int client_fd, const server_config *cfg, int served);
 
+/* 지금까지 처리한 요청 수 (모든 연결 합계, 종료 요약용) */
+long long conn_total_requests(void);
+
 /* 대기열이 가득 찼을 때: 요청을 읽지 않고 바로 503 + Retry-After 를 보내고 닫는다 (기다리지 않음) */
 void conn_reject_busy(int fd);
 

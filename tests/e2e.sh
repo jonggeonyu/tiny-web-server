@@ -94,10 +94,10 @@ start_server() {
 }
 
 # stop_server PID [시그널] → 종료 코드를 STOP_RC 에
-# 기본은 SIGTERM: 스크립트에서 & 로 띄운 프로그램은 bash 규칙상 SIGINT 를 "무시" 상태로 시작하므로,
-# 서버가 직접 처리기를 등록하기 전(10-3 이전)에는 SIGINT 로 끌 수 없다.
+# 기본은 SIGINT (Ctrl+C 와 같은 신호). 스크립트에서 & 로 띄운 프로그램은 bash 규칙상 SIGINT 를
+# "무시" 상태로 물려받지만, 서버가 sigaction 으로 처리기를 직접 등록해서 덮어쓴다 (10-3).
 stop_server() {
-    local pid=$1 sig=${2:-TERM} i
+    local pid=$1 sig=${2:-INT} i
     STOP_RC=
     kill -"$sig" "$pid" 2>/dev/null
     for ((i = 0; i < 300; i++)); do # 최대 30초
@@ -284,7 +284,64 @@ if [ -z "$E2E_WRAP" ]; then
     check "열린 fd 수가 시작 때와 같음" "$BASE_FDS" "$(ls "/proc/$S_PID/fd" | wc -l)"
 fi
 stop_server "$S_PID"
-check "SIGTERM 으로 서버가 끝남" yes "$([ "$STOP_RC" != killed ] && echo yes)"
+check "SIGINT(Ctrl+C) → 정상 종료 (종료 코드 0)" 0 "$STOP_RC"
+check_has "종료 요약이 로그에 남음" "[main] 종료 완료" "$(cat "$S_LOG")"
+
+# ================================================================== 안전한 종료
+section "안전한 종료 (SIGINT/SIGTERM)"
+# ① 처리 중인 요청은 끝까지, 응답은 Connection: close
+start_server F || exit 1
+UF=http://127.0.0.1:$F_PORT
+$C -i "$UF/cgi-bin/slow.sh" > "$WORK/inflight.out" &
+CP=$!
+sleep 0.5
+t0=$(date +%s%N)
+kill -TERM "$F_PID"
+sleep 0.3
+check "종료 시작 뒤 새 연결은 거절됨" 000 "$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "$UF/")"
+wait "$CP"
+check "처리 중이던 요청(2초 CGI)은 200 으로 끝남" "HTTP/1.1 200 OK" "$(head -1 "$WORK/inflight.out" | tr -d '\r')"
+check_has "그 응답은 Connection: close" "Connection: close" "$(tr -d '\r' < "$WORK/inflight.out")"
+stop_server "$F_PID" TERM
+check "SIGTERM → 정상 종료 (종료 코드 0)" 0 "$STOP_RC"
+check_lt "처리 중 요청을 기다려 약 1.5초 뒤 종료 (ms)" 3000 $(( ($(date +%s%N) - t0) / 1000000 ))
+check_has "로그: 처리 중 1개 마무리" "처리 중 1개" "$(cat "$F_LOG")"
+
+# ② 쉬는 keep-alive 연결은 기다리지 않고 바로 닫힘
+start_server G || exit 1
+timeout 10 python3 -I -c '
+import socket, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+time.sleep(0.3); s.recv(65536)        # 응답을 받고 쉬는 연결이 됨
+open(sys.argv[2], "w").write("ready")
+s.settimeout(5); t0 = time.time()
+print("closed" if s.recv(1) == b"" else "data", round((time.time() - t0) * 1000))
+' "$G_PORT" "$WORK/ka_ready" > "$WORK/ka.out" &
+KP=$!
+for i in $(seq 50); do [ -f "$WORK/ka_ready" ] && break; sleep 0.1; done
+stop_server "$G_PID"
+wait "$KP"
+check "쉬던 keep-alive 연결이 종료 때 닫힘" closed "$(awk '{print $1}' "$WORK/ka.out")"
+check_lt "그 연결은 1초 안에 닫힘 (ms)" 1000 "$(awk '{print $2}' "$WORK/ka.out")"
+check "정상 종료 (종료 코드 0)" 0 "$STOP_RC"
+
+# ③ 두 번째 신호 → 기다리지 않고 즉시 종료, 실행 중인 CGI 도 정리
+if [ -z "$E2E_WRAP" ]; then
+    start_server H || exit 1
+    $C -o /dev/null "http://127.0.0.1:$H_PORT/cgi-bin/forever.sh" &
+    FP=$!
+    sleep 0.5
+    CGI_PID=$(ps -o pid= --ppid "$H_PID" | head -1 | tr -d ' ')
+    t0=$(date +%s%N)
+    kill -INT "$H_PID"; sleep 0.2; kill -INT "$H_PID"
+    stop_server "$H_PID" 0 # 신호 0 = 아무것도 보내지 않고 끝나기만 기다림 (종료 코드를 거둔다)
+    check "두 번째 SIGINT → 즉시 종료 (종료 코드 130)" 130 "$STOP_RC"
+    check_lt "즉시 종료 (ms)" 1500 $(( ($(date +%s%N) - t0) / 1000000 ))
+    sleep 0.2
+    check "실행 중이던 CGI(forever.sh) 도 정리됨" gone "$([ -n "$CGI_PID" ] && ! kill -0 "$CGI_PID" 2>/dev/null && echo gone)"
+    wait "$FP" 2>/dev/null
+fi
 
 # ------------------------------------------------------------------ 결과
 printf '\n== e2e: %d개 중 %d개 실패\n' $((PASS + FAIL)) "$FAIL"

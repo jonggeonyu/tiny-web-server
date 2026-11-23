@@ -22,6 +22,9 @@ threadpool *threadpool_create(int nthreads, int queue_cap, tp_job_fn fn, void *a
 /* 대기열에 (fd, tag) 를 넣는다. 반환: 0 = 넣음, -1 = 가득 참 또는 종료 중 (fd 는 호출자가 처리) */
 int threadpool_submit(threadpool *tp, int fd, int tag);
 
+/* 지금 일하는 중인 일꾼 수와 대기열에 기다리는 일 수 (종료 로그용) */
+void threadpool_stats(threadpool *tp, int *busy, int *queued);
+
 /* 대기열에 남은 일까지 모두 처리한 뒤 일꾼을 끝내고 정리한다 */
 void threadpool_destroy(threadpool *tp);
 

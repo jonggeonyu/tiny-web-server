@@ -173,8 +173,6 @@ int main(int argc, char **argv)
            cfg.threads, cfg.queue_size, cfg.keepalive_timeout_ms / 1000, cfg.max_requests);
     fflush(stdout);
 
-    server_run(listen_fd, &cfg);
-
-    close(listen_fd);
+    server_run(listen_fd, &cfg); /* 종료 신호를 받아 정리를 마치면 돌아온다 (listen_fd 도 닫힘) */
     return 0;
 }

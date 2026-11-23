@@ -30,6 +30,7 @@ struct threadpool {
     int head;
     int count;
     int shutdown; /* 1 이면 더 받지 않고, 남은 일을 처리한 뒤 일꾼 종료 */
+    int busy;     /* 지금 일하는 중인 일꾼 수 */
 
     pthread_t *threads;
     worker_start *starts; /* 일꾼에게 넘긴 시작 정보 (풀이 끝날 때까지 살아 있어야 함) */
@@ -69,11 +70,16 @@ static void *worker_main(void *p)
         tp_item item = tp->queue[tp->head];
         tp->head = (tp->head + 1) % tp->cap;
         tp->count--;
+        tp->busy++;
         pthread_mutex_unlock(&tp->lock);
 
         /* 실제 일은 자물쇠를 푼 뒤에 한다. 쥔 채로 하면 다른 일꾼이 대기열을 못 만져서
          * 사실상 한 번에 하나씩만 처리하게 된다 */
         tp->fn(item.fd, item.tag, tp->arg);
+
+        pthread_mutex_lock(&tp->lock);
+        tp->busy--;
+        pthread_mutex_unlock(&tp->lock);
     }
     return NULL;
 }
@@ -91,6 +97,14 @@ int threadpool_submit(threadpool *tp, int fd, int tag)
     pthread_cond_signal(&tp->not_empty);
     pthread_mutex_unlock(&tp->lock);
     return 0;
+}
+
+void threadpool_stats(threadpool *tp, int *busy, int *queued)
+{
+    pthread_mutex_lock(&tp->lock);
+    *busy = tp->busy;
+    *queued = tp->count;
+    pthread_mutex_unlock(&tp->lock);
 }
 
 static void free_pool(threadpool *tp)

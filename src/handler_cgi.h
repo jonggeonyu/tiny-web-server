@@ -17,4 +17,9 @@
 
 void cgi_serve(const request_ctx *ctx, http_writer *w);
 
+/* 지금 실행 중인 모든 CGI 를 (프로세스 그룹째) 강제 종료한다.
+ * 두 번째 종료 신호로 서버가 즉시 끝날 때, CGI 가 고아로 남지 않게 시그널 처리기에서 부른다.
+ * async-signal-safe: 원자적 변수 읽기와 kill 만 한다 */
+void cgi_kill_all_running(void);
+
 #endif /* HANDLER_CGI_H */

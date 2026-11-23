@@ -2,6 +2,7 @@
 
 #include "http_response.h"
 #include "netio.h"
+#include "server.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -42,8 +43,9 @@ static size_t build_head(http_writer *w, int status, const char *content_type,
     if (http_format_date(time(NULL), date, sizeof(date)) == 0)
         return 0;
 
-    /* 연결 유지 여부는 상태 코드를 알아야 정할 수 있으므로 여기서 결정한다 */
-    w->keep_alive = w->server_keep_alive &&
+    /* 연결 유지 여부는 상태 코드를 알아야 정할 수 있으므로 여기서 결정한다.
+     * 서버 종료 여부도 "보내는 이 순간" 확인한다: 요청을 읽은 뒤 CGI 가 도는 사이에 종료가 시작됐을 수 있다 */
+    w->keep_alive = w->server_keep_alive && !server_stopping() &&
                     http_keep_alive_after(status, w->parsed_ok, w->client_keep_alive);
 
     http_head h;
