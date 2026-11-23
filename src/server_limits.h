@@ -45,6 +45,13 @@
 /* 정적 파일 경로 버퍼. realpath 결과와 같은 크기 (Linux PATH_MAX) */
 #define MAX_FILE_PATH 4096
 
+/* CGI (F10). 넘으면 프로그램을 죽이고 500 */
+#define CGI_TIMEOUT_SEC 5                     /* 실행 시간 */
+#define MAX_CGI_OUTPUT_BYTES (1024 * 1024)    /* 출력 (헤더 + 본문) */
+#define MAX_CGI_HEADER_BYTES 4096             /* 출력 중 헤더 부분 */
+#define MAX_CGI_CONTENT_TYPE 256              /* Content-Type 값 */
+#define CGI_WAIT_POLL_NSEC (10L * 1000 * 1000) /* 종료를 확인하는 간격 10ms */
+
 /* strerror_r로 만드는 에러 메시지 버퍼 */
 #define MAX_ERROR_TEXT 128
 

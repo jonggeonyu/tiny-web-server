@@ -229,6 +229,43 @@ static void test_f8_unreadable_file_returns_403(void)
     CHECK(open_uri("/secret.txt", &file) == 403);
 }
 
+/* uri를 해석하고 CGI 프로그램으로 확인한 상태 코드 */
+static int check_program(const char *uri)
+{
+    int status = files_resolve_path(temp_root, uri, opened_path,
+                                    sizeof(opened_path));
+    if (status != 200) {
+        return status;
+    }
+    return files_resolve_program(temp_root, opened_path, sizeof(opened_path));
+}
+
+static void test_f10_program_inside_root_is_found(void)
+{
+    char path[PATH_MAX];
+    char expected[PATH_MAX];
+
+    make_dir("cgi-bin");
+    write_file("cgi-bin/run.sh", "#!/bin/sh\n");
+    join_path(path, sizeof(path), "cgi-bin/run.sh");
+    CHECK(chmod(path, 0755) == 0);
+    CHECK(check_program("/cgi-bin/run.sh") == 200);
+    join_path(expected, sizeof(expected), "cgi-bin/run.sh");
+    CHECK_STR(opened_path, expected);
+}
+
+static void test_f10_program_must_be_executable_file(void)
+{
+    CHECK(check_program("/cgi-bin") == 403);              /* 디렉터리 */
+    CHECK(check_program("/cgi-bin/nope") == 404);
+    CHECK(check_program("/escape") == 403);               /* 루트 밖 링크 */
+    if (geteuid() == 0) {
+        return;   /* root는 실행 권한 검사를 통과한다 */
+    }
+    write_file("cgi-bin/plain.txt", "x");                 /* 0644 */
+    CHECK(check_program("/cgi-bin/plain.txt") == 403);
+}
+
 int main(void)
 {
     RUN(test_f7_known_extensions);
@@ -249,6 +286,8 @@ int main(void)
     RUN(test_f6_missing_file_returns_404);
     RUN(test_f8_symlink_outside_root_returns_403);
     RUN(test_f8_unreadable_file_returns_403);
+    RUN(test_f10_program_inside_root_is_found);
+    RUN(test_f10_program_must_be_executable_file);
     printf("files: %d checks, %d failed\n", test_checks, test_failures);
     return TEST_EXIT_CODE();
 }

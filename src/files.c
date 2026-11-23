@@ -1,4 +1,4 @@
-/* 정적 파일 경로 해석, 열기, MIME 타입 (F6, F7, F8) */
+/* 정적 파일 경로 해석, 열기, MIME 타입, CGI 프로그램 확인 (F6, F7, F8, F10) */
 
 /* realpath는 POSIX의 XSI 확장이라 이 파일에서만 켠다 */
 #define _XOPEN_SOURCE 700
@@ -31,6 +31,7 @@ static int open_inside_root(const char *root, const char *path,
                             StaticFile *file);
 static bool is_inside_root(const char *root, const char *real_path);
 static int status_from_errno(int error);
+static int check_executable(const char *real_path);
 static void close_keeping_errno(int fd);
 
 /* ---------------------------------------------------------------------------
@@ -65,6 +66,23 @@ int files_open(const char *root, char *path, size_t path_size,
         return status;
     }
     return open_inside_root(root, path, file);
+}
+
+int files_resolve_program(const char *root, char *path, size_t path_size)
+{
+    char real_path[PATH_MAX];
+
+    if (realpath(path, real_path) == NULL) {
+        return status_from_errno(errno);
+    }
+    if (!is_inside_root(root, real_path)) {
+        return 403;
+    }
+    int status = check_executable(real_path);
+    if (status != 200) {
+        return status;
+    }
+    return build_path(real_path, "", path, path_size);
 }
 
 /* ---------------------------------------------------------------------------
@@ -296,6 +314,23 @@ static int status_from_errno(int error)
         return 414;
     }
     return 500;
+}
+
+/* 일반 파일이고 실행 권한이 있는지. 반환: 200, 403, 그 밖은 status_from_errno */
+static int check_executable(const char *real_path)
+{
+    struct stat info;
+
+    if (stat(real_path, &info) < 0) {
+        return status_from_errno(errno);
+    }
+    if (!S_ISREG(info.st_mode)) {
+        return 403;
+    }
+    if (access(real_path, X_OK) < 0) {
+        return status_from_errno(errno);   /* EACCES → 403 */
+    }
+    return 200;
 }
 
 /* close가 errno를 덮어쓰지 않게, 실패 원인을 보존한 채 닫는다 */

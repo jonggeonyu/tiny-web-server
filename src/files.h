@@ -35,4 +35,11 @@ int files_resolve_path(const char *root, const char *uri,
 int files_open(const char *root, char *path, size_t path_size,
                StaticFile *file);
 
+/* CGI(F10) 프로그램 경로를 확인한다. path는 files_resolve_path 결과.
+ * 심볼릭 링크를 따라간 실제 위치가 root 안이고, 일반 파일이고, 실행 권한이
+ * 있어야 한다. 통과하면 path를 그 실제 경로로 바꾼다 (path 버퍼를 고친다).
+ * 반환: 200, 루트 밖·일반 파일 아님·실행 권한 없음 403, 없음 404,
+ *       경로가 너무 김 414, 그 밖의 실패 500 */
+int files_resolve_program(const char *root, char *path, size_t path_size);
+
 #endif

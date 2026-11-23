@@ -23,7 +23,7 @@ actual=$(wc -c <"$TMP/body.txt")
     || fail "f5_content_length_matches_body" "header $declared, body $actual"
 
 # --- POST + 본문 (본문을 읽어 버려서 클라이언트가 응답을 정상 수신) ---
-reply=$(curl_local -i -X POST --data-binary "a=1&b=2" "http://127.0.0.1:$PORT/form")
+reply=$(curl_local -i -X POST --data-binary "a=1&b=2" "http://127.0.0.1:$PORT/cgi-bin/echo")
 expect_status "f3_post_with_body_200" 200 "$(status_of "$reply")"
 printf '%s' "$reply" | grep -q "content-length: 7" \
     && pass "f3_post_content_length_parsed" || fail "f3_post_content_length_parsed"

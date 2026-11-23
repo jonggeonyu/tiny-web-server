@@ -13,6 +13,16 @@ mkdir -p "$WWW"
 printf '<h1>index</h1>\n' >"$WWW/index.html"
 printf 'split ok\n' >"$WWW/split.txt"
 
+# 테스트용 CGI: 받은 요청 정보와 본문 바이트 수를 그대로 보여준다
+mkdir -p "$WWW/cgi-bin"
+cat >"$WWW/cgi-bin/echo" <<'CGI'
+#!/bin/sh
+printf 'Content-Type: text/plain\r\n\r\n'
+printf 'method: %s\nquery: %s\ncontent-length: %s\nbody-bytes: %s\n' \
+    "$REQUEST_METHOD" "$QUERY_STRING" "$CONTENT_LENGTH" "$(wc -c | tr -d ' ')"
+CGI
+chmod 755 "$WWW/cgi-bin/echo"
+
 E2E_PASS=0
 E2E_FAIL=0
 SERVER_PID=""

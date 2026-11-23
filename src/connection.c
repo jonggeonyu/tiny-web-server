@@ -1,5 +1,6 @@
-/* 연결 처리 (F2~F5 연결부, F4 POST 본문, F6 정적 파일 전송, F9) */
+/* 연결 처리 (F2~F5 연결부, F4 POST 본문, F6 정적 파일 전송, F9, F10 CGI 연결부) */
 #include "connection.h"
+#include "cgi.h"
 #include "files.h"
 #include "http.h"
 #include "rio.h"
@@ -13,13 +14,17 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-static int serve_post(int connfd, Rio *rio, const HttpRequest *request);
+static int route_request(int connfd, Rio *rio, const char *root,
+                         const HttpRequest *request);
+static bool is_cgi_path(const char *root, const char *path);
+static int serve_cgi(int connfd, Rio *rio, const char *root,
+                     const HttpRequest *request, char *path,
+                     size_t path_size);
 static int read_body(Rio *rio, const HttpRequest *request, char *body);
-static int send_placeholder(int connfd, const HttpRequest *request,
-                            size_t body_length);
-static int serve_static(int connfd, const char *root, const char *uri);
-static int find_static_file(const char *root, const char *uri,
-                            StaticFile *file);
+static int run_cgi(const char *program, const HttpRequest *request,
+                   const char *body, CgiResult *output);
+static int serve_static(int connfd, const char *root, char *path,
+                        size_t path_size);
 static int send_file(int connfd, const StaticFile *file);
 static int send_file_body(int connfd, const StaticFile *file);
 static int discard_body(Rio *rio, long length);
@@ -47,38 +52,89 @@ int connection_serve(int connfd, const char *root)
     if (status != 200) {
         return send_error_and_linger(connfd, status);
     }
-    if (request.method == HTTP_POST) {
-        return serve_post(connfd, &rio, &request);
-    }
-    /* GET에 본문이 붙어 오면 쓰지 않는다. 그래도 안 읽고 닫으면 커널이 RST를
-     * 보내 클라이언트가 응답을 못 받을 수 있어서 읽어서 버린다 */
-    if (discard_body(&rio, request.content_length) < 0) {
-        return -1;
-    }
-    return serve_static(connfd, root, request.uri);
+    return route_request(connfd, &rio, root, &request);
 }
 
 /* ---------------------------------------------------------------------------
  * 도우미: 이 파일 안에서만 쓴다. 전부 static.
  * ------------------------------------------------------------------------- */
 
-/* POST 본문을 끝까지 읽는다 (F4). 버퍼는 클라이언트가 말한 길이가 아니라
- * 한도(MAX_BODY_BYTES) 크기로 고정해서 잡는다. 파서가 이미 한도 초과를
- * 413으로 끊었으므로 content_length는 이 안에 들어간다.
- * CGI(F10)가 붙기 전까지는 받은 바이트 수를 보여주는 임시 응답을 보낸다. */
-static int serve_post(int connfd, Rio *rio, const HttpRequest *request)
+/* URI를 디스크 경로로 먼저 풀고(F8) CGI인지 정적 파일인지 고른다.
+ * 푼 경로로 고르므로 "/%63gi-bin/x"처럼 인코딩해도 CGI로 간다
+ * (안 그러면 프로그램 소스가 정적 파일로 새어 나간다) */
+static int route_request(int connfd, Rio *rio, const char *root,
+                         const HttpRequest *request)
 {
+    char path[MAX_FILE_PATH];
+
+    int status = files_resolve_path(root, request->uri, path, sizeof(path));
+    if (status == 200 && is_cgi_path(root, path)) {
+        return serve_cgi(connfd, rio, root, request, path, sizeof(path));
+    }
+    /* 정적 파일 요청에 본문이 붙어 오면 쓰지 않는다. 그래도 안 읽고 닫으면
+     * 커널이 RST를 보내 클라이언트가 응답을 못 받을 수 있어서 읽어서 버린다 */
+    if (discard_body(rio, request->content_length) < 0) {
+        return -1;
+    }
+    if (status != 200) {
+        return send_error_and_linger(connfd, status);
+    }
+    if (request->method == HTTP_POST) {
+        /* POST는 CGI 프로그램만 받는다. 정적 파일은 GET만 */
+        return send_error_and_linger(connfd, 501);
+    }
+    return serve_static(connfd, root, path, sizeof(path));
+}
+
+/* root 바로 아래 "/cgi-bin/" 안의 경로인지 */
+static bool is_cgi_path(const char *root, const char *path)
+{
+    static const char CGI_DIRECTORY[] = "/cgi-bin/";
+
+    return strncmp(path + strlen(root), CGI_DIRECTORY,
+                   strlen(CGI_DIRECTORY)) == 0;
+}
+
+/* CGI 요청 (F10). 본문을 끝까지 읽고(F4) → 프로그램 확인 → 실행 →
+ * 출력을 응답으로 보낸다. 본문 버퍼는 클라이언트가 말한 길이가 아니라
+ * 한도(MAX_BODY_BYTES)로 고정해 잡는다. 파서가 한도 초과를 이미 413으로
+ * 끊었으므로 content_length는 이 안에 들어간다. */
+static int serve_cgi(int connfd, Rio *rio, const char *root,
+                     const HttpRequest *request, char *path,
+                     size_t path_size)
+{
+    CgiResult output;
+    int status = 500;
+    int result = -1;
+
+    memset(&output, 0, sizeof(output));
     char *body = malloc(MAX_BODY_BYTES);
     if (body == NULL) {
         (void)report_errno("allocate body buffer");
         return send_error_and_linger(connfd, 500);
     }
-
-    int result = read_body(rio, request, body);
-    if (result == 0) {
-        result = send_placeholder(connfd, request,
-                                  (size_t)request->content_length);
+    if (read_body(rio, request, body) < 0) {
+        goto cleanup;
     }
+    status = files_resolve_program(root, path, path_size);
+    if (status == 500) {
+        (void)report_errno("check cgi program");
+    }
+    if (status == 200) {
+        status = run_cgi(path, request, body, &output);
+    }
+    if (status != 200) {
+        result = send_error_and_linger(connfd, status);
+        goto cleanup;
+    }
+    result = http_send_response(connfd, 200, output.content_type,
+                                output.body, output.body_length, false);
+    if (result < 0) {
+        (void)report_errno("send cgi response");
+    }
+
+cleanup:
+    cgi_free_result(&output);
     free(body);
     return result;
 }
@@ -102,38 +158,33 @@ static int read_body(Rio *rio, const HttpRequest *request, char *body)
     return 0;
 }
 
-/* CGI(F10)가 붙기 전까지 POST 요청의 파싱 결과를 보여주는 임시 응답 */
-static int send_placeholder(int connfd, const HttpRequest *request,
-                            size_t body_length)
+/* 요청에서 CGI 환경 변수에 넣을 값을 꺼내 프로그램을 돌린다.
+ * 반환: cgi_run과 같다 (200, 500) */
+static int run_cgi(const char *program, const HttpRequest *request,
+                   const char *body, CgiResult *output)
 {
-    char body[MAX_RESPONSE_HEAD];
-
-    int length = snprintf(body, sizeof(body),
-                          "method: %s\nuri: %s\nversion: HTTP/1.%d\n"
-                          "headers: %zu\ncontent-length: %ld\n"
-                          "body-bytes: %zu\n",
-                          request->method_text, request->uri,
-                          request->version_minor, request->header_count,
-                          request->content_length, body_length);
-    if (length < 0) {
-        return -1;
-    }
-    if ((size_t)length >= sizeof(body)) {
-        length = (int)sizeof(body) - 1;   /* 긴 URI는 잘라서 보여준다 */
-    }
-    if (http_send_response(connfd, 200, "text/plain; charset=utf-8",
-                           body, (size_t)length, false) < 0) {
-        return report_errno("send response");
-    }
-    return 0;
+    const char *query = strchr(request->uri, '?');
+    CgiRequest cgi_request = {
+        .method = request->method_text,
+        .query = query == NULL ? "" : query + 1,
+        .content_type = http_find_header(request, "Content-Type"),
+        .body = body,
+        .body_length = (size_t)request->content_length,
+    };
+    return cgi_run(program, &cgi_request, output);
 }
 
-/* GET 요청을 root 아래 파일로 응답한다 (F6). 못 찾으면 오류 응답 (F9) */
-static int serve_static(int connfd, const char *root, const char *uri)
+/* GET 요청을 path(검사를 마친 디스크 경로) 파일로 응답한다 (F6).
+ * 못 열면 오류 응답 (F9). 500이면 원인을 찍는다 */
+static int serve_static(int connfd, const char *root, char *path,
+                        size_t path_size)
 {
     StaticFile file;
 
-    int status = find_static_file(root, uri, &file);
+    int status = files_open(root, path, path_size, &file);
+    if (status == 500) {
+        (void)report_errno("open file");
+    }
     if (status != 200) {
         return send_error_and_linger(connfd, status);
     }
@@ -142,24 +193,6 @@ static int serve_static(int connfd, const char *root, const char *uri)
         (void)report_errno("close file");
     }
     return result;
-}
-
-/* URI 검사(F8) → 파일 열기. 반환은 files_open과 같다.
- * 500이면 원인을 여기서 찍는다 (errno는 files_open이 남겨 둔 것) */
-static int find_static_file(const char *root, const char *uri,
-                            StaticFile *file)
-{
-    char path[MAX_FILE_PATH];
-
-    int status = files_resolve_path(root, uri, path, sizeof(path));
-    if (status != 200) {
-        return status;
-    }
-    status = files_open(root, path, sizeof(path), file);
-    if (status == 500) {
-        (void)report_errno("open file");
-    }
-    return status;
 }
 
 static int send_file(int connfd, const StaticFile *file)

@@ -156,12 +156,22 @@ static void test_f4_missing_content_length_differs_from_zero(void)
 {
     const char *missing[] = {"Host: a\r\n", NULL};
     const char *zero[] = {"Host: a\r\n", "Content-Length: 0\r\n", NULL};
-    CHECK(parse_all("POST / HTTP/1.1\r\n", missing) == 200);
+    CHECK(parse_all("GET / HTTP/1.1\r\n", missing) == 200);
     CHECK(!request.has_content_length);
     CHECK(request.content_length == 0);
     CHECK(parse_all("POST / HTTP/1.1\r\n", zero) == 200);
     CHECK(request.has_content_length);
     CHECK(request.content_length == 0);
+}
+
+static void test_f4_post_without_content_length_returns_411(void)
+{
+    const char *missing[] = {"Host: a\r\n", NULL};
+    const char *http10[] = {NULL};
+    CHECK(parse_all("POST / HTTP/1.1\r\n", missing) == 411);
+    CHECK(parse_all("POST / HTTP/1.0\r\n", http10) == 411);
+    /* GET은 본문이 없는 게 보통이라 길이가 없어도 된다 */
+    CHECK(parse_all("GET / HTTP/1.1\r\n", missing) == 200);
 }
 
 static void test_f3_bad_content_length_returns_400(void)
@@ -335,6 +345,7 @@ int main(void)
     RUN(test_n3_header_storage_full_returns_431);
     RUN(test_f3_content_length_parsed);
     RUN(test_f4_missing_content_length_differs_from_zero);
+    RUN(test_f4_post_without_content_length_returns_411);
     RUN(test_f3_bad_content_length_returns_400);
     RUN(test_n3_body_over_limit_returns_413);
     RUN(test_f3_transfer_encoding_returns_501);
