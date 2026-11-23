@@ -31,12 +31,13 @@ pass() { E2E_PASS=$((E2E_PASS + 1)); echo "PASS $1"; }
 fail() { E2E_FAIL=$((E2E_FAIL + 1)); echo "FAIL $1${2:+: $2}"; }
 
 # start_server <port> [root] : 백그라운드로 띄우고 listen 할 때까지 기다린다.
-# root를 안 주면 $WWW
+# root를 안 주면 $WWW. 옵션은 환경 변수로 준다: SERVER_OPTIONS="-t 1 -q 1"
 start_server() {
     # 지난 실행의 로그가 남아 있으면 "listening"을 미리 찾아버려서, 서버가
     # 뜨기 전에 테스트가 시작된다. 그래서 로그를 먼저 지운다
     rm -f "$TMP/server_$1.log"
-    "$SERVER" "$1" "${2:-$WWW}" >"$TMP/server_$1.log" 2>&1 &
+    # shellcheck disable=SC2086  # 옵션 여러 개를 낱말로 나눠 넘기려고 따옴표 없음
+    "$SERVER" $SERVER_OPTIONS "$1" "${2:-$WWW}" >"$TMP/server_$1.log" 2>&1 &
     SERVER_PID=$!
     for _ in $(seq 1 50); do
         if grep -q "listening" "$TMP/server_$1.log" 2>/dev/null; then

@@ -311,6 +311,11 @@ static void test_f5_keep_alive_header(void)
     char head[MAX_RESPONSE_HEAD];
     http_build_response_head(head, sizeof(head), 200, "text/plain", 0, true);
     CHECK(strstr(head, "\r\nConnection: keep-alive\r\n") != NULL);
+    /* 쉬는 연결을 몇 초 뒤 닫는지 알린다 (F11) */
+    CHECK(strstr(head, "\r\nKeep-Alive: timeout=5\r\n\r\n") != NULL);
+
+    http_build_response_head(head, sizeof(head), 200, "text/plain", 0, false);
+    CHECK(strstr(head, "Keep-Alive:") == NULL);
 }
 
 static void test_f5_small_buffer_returns_minus_1(void)

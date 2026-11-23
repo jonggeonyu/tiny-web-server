@@ -29,6 +29,7 @@ static int read_request_line(Rio *rio, HttpRequest *request);
 static int read_headers(Rio *rio, HttpRequest *request);
 static bool is_line_cut(const char *line, ssize_t n);
 static int format_date(char *out, size_t out_size);
+static int format_keep_alive_line(char *out, size_t out_size);
 
 /* ---------------------------------------------------------------------------
  * 공개: 헤더에 선언된 함수. 모양을 바꾸려면 팀과 먼저 정한다.
@@ -180,8 +181,13 @@ int http_build_response_head(char *out, size_t out_size, int status,
                              size_t content_length, bool keep_alive)
 {
     char date[MAX_DATE_TEXT];
+    char keep_alive_line[MAX_KEEP_ALIVE_LINE] = "";
 
     if (format_date(date, sizeof(date)) < 0) {
+        return -1;
+    }
+    if (keep_alive && format_keep_alive_line(keep_alive_line,
+                                             sizeof(keep_alive_line)) < 0) {
         return -1;
     }
     int length = snprintf(out, out_size,
@@ -191,10 +197,12 @@ int http_build_response_head(char *out, size_t out_size, int status,
                           "Content-Type: %s\r\n"
                           "Content-Length: %zu\r\n"
                           "Connection: %s\r\n"
+                          "%s"
                           "\r\n",
                           status, http_status_reason(status), date,
                           content_type, content_length,
-                          keep_alive ? "keep-alive" : "close");
+                          keep_alive ? "keep-alive" : "close",
+                          keep_alive_line);
     /* snprintf는 잘려도 "만들려던 길이"를 돌려주므로 크기와 비교해야 한다 */
     if (length < 0 || (size_t)length >= out_size) {
         return -1;
@@ -523,6 +531,18 @@ static int format_date(char *out, size_t out_size)
         return -1;
     }
     if (strftime(out, out_size, "%a, %d %b %Y %H:%M:%S GMT", &utc) == 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* "Keep-Alive: timeout=5\r\n": 쉬는 연결을 몇 초 뒤 닫는지 클라이언트에 알린다
+ * (F11). 반환: 0, out이 모자라면 -1 */
+static int format_keep_alive_line(char *out, size_t out_size)
+{
+    int length = snprintf(out, out_size, "Keep-Alive: timeout=%d\r\n",
+                          KEEPALIVE_IDLE_SEC);
+    if (length < 0 || (size_t)length >= out_size) {
         return -1;
     }
     return 0;

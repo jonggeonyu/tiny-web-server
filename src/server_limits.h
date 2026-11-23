@@ -59,4 +59,28 @@
 #define MAX_HOST_TEXT 64
 #define MAX_PORT_TEXT 8
 
+/* 스레드 풀 (N1, N2). 일꾼 수 기본값은 코어 수 x WORKERS_PER_CORE를
+ * [MIN_WORKERS, MAX_WORKERS]로 자른 값. 일꾼은 대부분 I/O를 기다리므로
+ * 코어보다 많이 둔다. -t, -q로 바꿀 수 있다 */
+#define WORKERS_PER_CORE 2
+#define MIN_WORKERS 4
+#define MAX_WORKERS 64
+#define DEFAULT_QUEUE_CAPACITY 256   /* 기다리는 연결 큐. 가득 차면 503 */
+#define MAX_QUEUE_CAPACITY 4096
+
+/* 시간 제한 (N3, F11). 초 단위.
+ * REQUEST: 새 연결의 첫 요청을 기다리는 시간이자 요청 하나(헤더+본문)를
+ *          다 받는 시간. 넘으면 408
+ * KEEPALIVE_IDLE: 응답 뒤 다음 요청을 기다리는 시간. 넘으면 조용히 닫음
+ * WRITE: 쓰기가 이만큼 막히면(클라이언트가 안 받아 감) 끊음 */
+#define REQUEST_TIMEOUT_SEC 10
+#define KEEPALIVE_IDLE_SEC 5
+#define WRITE_TIMEOUT_SEC 10
+
+/* 연결 하나에서 처리할 최대 요청 수. 마지막 응답은 Connection: close */
+#define KEEPALIVE_MAX_REQUESTS 100
+
+/* 응답 헤더 "Keep-Alive: timeout=5" 한 줄 버퍼 */
+#define MAX_KEEP_ALIVE_LINE 64
+
 #endif

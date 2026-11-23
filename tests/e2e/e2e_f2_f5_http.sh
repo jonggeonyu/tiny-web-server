@@ -13,7 +13,7 @@ grep -q "^hello$" "$TMP/body.txt" && pass "f2_uri_with_query_parsed" \
     || fail "f2_uri_with_query_parsed"
 
 # --- F5 응답 헤더 ---
-for h in "Content-Type: text/plain" "Content-Length: " "Connection: close" "Date: "; do
+for h in "Content-Type: text/plain" "Content-Length: " "Connection: " "Date: "; do
     printf '%s' "$headers" | grep -qi "^$h" && pass "f5_header ${h%%:*}" \
         || fail "f5_header ${h%%:*}"
 done

@@ -1,7 +1,8 @@
 # 빌드 규칙. 결과물은 build/(오브젝트)와 bin/(실행 파일)에 만든다.
 CC       ?= gcc
-CFLAGS   := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -g -O1
-LDFLAGS  :=
+CFLAGS   := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -g -O1 \
+            -pthread
+LDFLAGS  := -pthread
 SANITIZE ?=
 
 ifeq ($(SANITIZE),address)
@@ -16,7 +17,8 @@ endif
 BUILD := build
 BIN   := bin
 
-LIB_SOURCES  := src/rio.c src/net.c src/http.c src/files.c src/cgi.c src/connection.c
+LIB_SOURCES  := src/rio.c src/net.c src/http.c src/files.c src/cgi.c src/pool.c \
+                src/connection.c
 LIB_OBJECTS  := $(LIB_SOURCES:src/%.c=$(BUILD)/%.o)
 UNIT_SOURCES := $(wildcard tests/unit/test_*.c)
 UNIT_BINS    := $(UNIT_SOURCES:tests/unit/%.c=$(BIN)/%)
@@ -47,9 +49,12 @@ asan:
 	$(MAKE) clean
 	$(MAKE) SANITIZE=address test e2e
 
+# 스레드 경쟁 검사. 최근 리눅스 커널은 주소 무작위화(ASLR) 범위가 넓어
+# TSan이 "unexpected memory mapping"으로 바로 죽는다. setarch -R로 이 명령과
+# 자식 프로세스(테스트, 서버)의 무작위화를 끄고 돌린다
 tsan:
 	$(MAKE) clean
-	$(MAKE) SANITIZE=thread test e2e
+	setarch $$(uname -m) -R $(MAKE) SANITIZE=thread test e2e
 
 $(BUILD) $(BIN):
 	mkdir -p $@

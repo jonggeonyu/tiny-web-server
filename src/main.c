@@ -1,15 +1,18 @@
-/* 서버 진입점 (F1, F12 일부, N5). 지금은 반복형(iterative) HTTP 서버다.
- * 한 번에 한 연결만 처리하고, 동시 처리는 스레드 풀 단계(N1, N2)에서 붙인다. */
+/* 서버 진입점 (F1, F12 일부, N1, N2, N5).
+ * 메인 스레드는 accept만 하고, 받은 연결은 스레드 풀 큐에 넣는다.
+ * 큐가 가득 차면 메인이 바로 503으로 거절한다. */
 
 /* realpath는 POSIX의 XSI 확장이라 이 파일에서만 켠다 */
 #define _XOPEN_SOURCE 700
 
 #include "connection.h"
 #include "net.h"
+#include "pool.h"
 #include "server_limits.h"
 
 #include <errno.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdio.h>
@@ -20,10 +23,23 @@
 #include <time.h>
 #include <unistd.h>
 
+/* 명령줄에서 읽은 설정 */
+typedef struct {
+    const char *port;
+    const char *root;
+    size_t worker_count;
+    size_t queue_capacity;
+} ServerOptions;
+
+static int parse_options(int argc, char **argv, ServerOptions *options);
+static int parse_count(const char *text, size_t max, size_t *out);
+static size_t find_default_worker_count(void);
 static void print_usage(const char *program);
 static int resolve_root(const char *input, char *out);
 static void ignore_sigpipe(void);
-static void serve_forever(int listenfd, const char *root);
+static void serve_connection(int connfd, void *context);
+static void serve_forever(int listenfd, WorkerPool *pool);
+static void reject_connection(int connfd);
 static void handle_accept_error(int error);
 static bool is_retryable_accept_error(int error);
 static bool is_resource_shortage(int error);
@@ -39,27 +55,47 @@ static const char *format_errno(int error, char *out, size_t out_size);
 
 int main(int argc, char **argv)
 {
+    ServerOptions options;
     char root[PATH_MAX];
 
-    if (argc != 3 || !net_is_valid_port(argv[1])) {
+    if (parse_options(argc, argv, &options) < 0) {
         print_usage(argv[0]);
         return 1;
     }
-    if (resolve_root(argv[2], root) < 0) {
+    if (resolve_root(options.root, root) < 0) {
         return 1;
     }
 
     ignore_sigpipe();
 
-    int listenfd = net_open_listenfd(argv[1]);
+    int listenfd = net_open_listenfd(options.port);
     if (listenfd < 0) {
         return 1;
     }
-    fprintf(stderr, "info: listening on 0.0.0.0:%s, root %s\n", argv[1], root);
 
-    serve_forever(listenfd, root);
+    /* 일꾼이 같이 읽는 설정. main이 끝날 때까지 살아 있다 */
+    ConnectionContext context = {.root = root, .pool = NULL};
+    WorkerPool *pool = pool_create(options.worker_count,
+                                   options.queue_capacity,
+                                   serve_connection, &context);
+    if (pool == NULL) {
+        char message[MAX_ERROR_TEXT];
+        int saved_errno = errno;
+        fprintf(stderr, "error: start worker pool: %s\n",
+                format_errno(saved_errno, message, sizeof(message)));
+        return 1;
+    }
+    /* 아직 큐에 넣은 연결이 없어 일꾼이 context를 읽기 전이다.
+     * 첫 pool_submit의 락이 이 쓰기를 일꾼에게 보이게 한다 */
+    context.pool = pool;
+    fprintf(stderr, "info: listening on 0.0.0.0:%s, root %s, "
+            "workers %zu, queue %zu\n", options.port, root,
+            options.worker_count, options.queue_capacity);
+
+    serve_forever(listenfd, pool);
     /* 지금은 serve_forever가 돌아오지 않는다. N4(graceful shutdown)에서
-     * 루프가 끝나면 여기서 listen 소켓을 닫는다 */
+     * 루프가 끝나면 여기서 남은 연결을 마무리하고 listen 소켓을 닫는다 */
+    pool_destroy(pool);
     close_socket(listenfd, "listen socket");
     return 0;
 }
@@ -68,11 +104,81 @@ int main(int argc, char **argv)
  * 도우미: 이 파일 안에서만 쓴다. 전부 static.
  * ------------------------------------------------------------------------- */
 
+/* "[-t 일꾼 수] [-q 큐 크기] <port> <root>"를 읽는다. 옵션은 앞에 온다.
+ * 반환: 0, 형식이 틀리면 -1 */
+static int parse_options(int argc, char **argv, ServerOptions *options)
+{
+    int option;
+
+    options->worker_count = find_default_worker_count();
+    options->queue_capacity = DEFAULT_QUEUE_CAPACITY;
+    while ((option = getopt(argc, argv, "t:q:")) != -1) {
+        if (option == 't'
+            && parse_count(optarg, MAX_WORKERS, &options->worker_count) == 0) {
+            continue;
+        }
+        if (option == 'q'
+            && parse_count(optarg, MAX_QUEUE_CAPACITY,
+                           &options->queue_capacity) == 0) {
+            continue;
+        }
+        return -1;
+    }
+    if (argc - optind != 2 || !net_is_valid_port(argv[optind])) {
+        return -1;
+    }
+    options->port = argv[optind];
+    options->root = argv[optind + 1];
+    return 0;
+}
+
+/* 1 이상 max 이하인 10진수만 받는다. 반환: 0, 아니면 -1 */
+static int parse_count(const char *text, size_t max, size_t *out)
+{
+    char *end;
+
+    errno = 0;
+    long value = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') {
+        return -1;
+    }
+    if (value < 1 || (unsigned long)value > max) {
+        return -1;
+    }
+    *out = (size_t)value;
+    return 0;
+}
+
+/* 코어 수 x WORKERS_PER_CORE를 [MIN_WORKERS, MAX_WORKERS]로 자른다.
+ * 일꾼은 대부분 네트워크·디스크·CGI를 기다리므로 코어보다 많아야 CPU를
+ * 놀리지 않는다. 너무 많으면 스택 메모리와 문맥 전환만 는다 */
+static size_t find_default_worker_count(void)
+{
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (cores < 1) {
+        cores = 1;        /* 알 수 없으면 1코어로 보고 최솟값을 쓴다 */
+    }
+    size_t count = (size_t)cores * WORKERS_PER_CORE;
+    if (count < MIN_WORKERS) {
+        return MIN_WORKERS;
+    }
+    if (count > MAX_WORKERS) {
+        return MAX_WORKERS;
+    }
+    return count;
+}
+
 static void print_usage(const char *program)
 {
-    fprintf(stderr, "usage: %s <port> <root>\n", program);
+    fprintf(stderr, "usage: %s [-t workers] [-q queue] <port> <root>\n",
+            program);
     fprintf(stderr, "  port: 1-%d\n", MAX_PORT_NUMBER);
     fprintf(stderr, "  root: directory to serve static files from\n");
+    fprintf(stderr, "  -t: worker threads, 1-%d (default: cores x %d, "
+            "%d-%d)\n", MAX_WORKERS, WORKERS_PER_CORE, MIN_WORKERS,
+            MAX_WORKERS);
+    fprintf(stderr, "  -q: waiting connection queue, 1-%d (default %d). "
+            "full -> 503\n", MAX_QUEUE_CAPACITY, DEFAULT_QUEUE_CAPACITY);
 }
 
 /* 정적 루트를 심볼릭 링크와 ".."가 없는 절대 경로로 바꿔 out(PATH_MAX)에
@@ -111,7 +217,17 @@ static void ignore_sigpipe(void)
     }
 }
 
-static void serve_forever(int listenfd, const char *root)
+/* 일꾼이 큐에서 꺼낸 연결 하나를 처리하고 닫는다 (pool의 job) */
+static void serve_connection(int connfd, void *context)
+{
+    /* 실패해도 원인은 connection_serve가 이미 찍었고, 할 일은 닫기뿐이다 */
+    (void)connection_serve(connfd, context);
+    close_socket(connfd, "connection");
+}
+
+/* accept만 하고 연결은 큐에 넘긴다. 메인 스레드는 요청을 읽지 않으므로
+ * 느린 클라이언트가 있어도 다음 accept가 늦어지지 않는다 */
+static void serve_forever(int listenfd, WorkerPool *pool)
 {
     for (;;) {
         struct sockaddr_storage client;
@@ -125,10 +241,19 @@ static void serve_forever(int listenfd, const char *root)
         }
 
         log_connection(&client, client_length);
-        /* 실패해도 원인은 connection_serve가 이미 찍었고, 할 일은 닫기뿐이다 */
-        (void)connection_serve(connfd, root);
-        close_socket(connfd, "connection");
+        if (pool_submit(pool, connfd) < 0) {
+            reject_connection(connfd);
+        }
     }
+}
+
+/* 큐가 가득 찬 연결: 메인 스레드가 기다리지 않고 503을 보내고 닫는다 (N2) */
+static void reject_connection(int connfd)
+{
+    fprintf(stderr, "warn: queue full, rejecting connection with 503\n");
+    /* 실패해도 원인은 connection_reject_busy가 찍었고, 할 일은 닫기뿐이다 */
+    (void)connection_reject_busy(connfd);
+    close_socket(connfd, "rejected connection");
 }
 
 /* accept 실패를 세 가지로 나눈다.
