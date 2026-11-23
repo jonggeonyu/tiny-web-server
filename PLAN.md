@@ -276,7 +276,8 @@ main → server → threadpool → conn → router → handler_static / handler_
 - **검사**
   ```bash
   make asan && ./build/tiny-asan -p 8080 -r ./www -c ./cgi-bin &   # e2e 실행 후 Ctrl+C → 누수 리포트 없어야 함
-  valgrind --leak-check=full ./build/tiny -p 8080 ...              # (선택)
+  make e2e E2E_BIN=build/tiny-asan   # (10-4) ASan 서버로 e2e + 종료 때 LeakSanitizer, 로그에 sanitizer 보고 0
+  make valgrind                      # (10-4) 디버그 빌드를 valgrind 로: 에러/누수 0, 종료 시 열린 fd = 표준 입출력 3개
   ./tests/e2e.sh                                                    # 위 모든 curl 확인을 자동화
   ab -n 20000 -c 100 http://localhost:8080/index.html               # 처리량 기록 (README용)
   (printf 'GET / HTTP/1.1\r\nHost: x\r\n'; sleep 1) | nc -q0 localhost 8080   # 요청 도중 끊기 → 서버 정상

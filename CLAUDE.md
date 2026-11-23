@@ -36,7 +36,7 @@
 - 단위 테스트: 외부 프레임워크 없이 assert 기반, `make test`로 실행.
 
 ## 코드 규칙
-- C11 + POSIX (`-std=c11 -D_POSIX_C_SOURCE=200809L`). Linux 전용 함수는 꼭 필요할 때만, `#ifdef`로 분리.
+- C11 + POSIX (`-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700`, `realpath` 때문에 X/Open 확장 포함). Linux 전용 함수는 꼭 필요할 때만, `#ifdef`로 분리.
 - HTTP 파싱 코드는 소켓을 모른다 (바이트 버퍼만 입력으로 받는 순수 함수) → 단위 테스트 가능하게 유지.
 - `malloc`/`free` 짝 맞추기, 모든 버퍼 쓰기는 크기 검사. `sprintf`/`strcpy` 대신 `snprintf` 등 길이 제한 함수 사용.
 - 시스템 콜 반환값은 항상 확인한다 (`EINTR`, 부분 쓰기 포함).

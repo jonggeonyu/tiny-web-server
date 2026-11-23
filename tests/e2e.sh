@@ -4,11 +4,12 @@
 #
 #   make e2e                                   # 일반 빌드로
 #   make e2e E2E_BIN=build/tiny-asan           # ASan 빌드로 (누수 검사는 10-4 에서)
-#   E2E_WRAP="valgrind -q" E2E_SKIP_SLOW=1 bash tests/e2e.sh
+#   make valgrind                              # 디버그 빌드를 valgrind 로 감싸서 (누수/메모리 오류/fd 집계)
 #
 # 환경 변수
 #   E2E_BIN        실행할 서버 (기본 build/tiny)
-#   E2E_WRAP       서버 앞에 붙일 명령 (예: valgrind ...)
+#   E2E_WRAP       서버 앞에 붙일 명령
+#   E2E_VALGRIND   1 이면 서버마다 valgrind 로 감싸고, 끝에 결과를 집계 (build/valgrind-logs/ 에 로그 보관)
 #   E2E_SKIP_SLOW  1 이면 몇 초씩 걸리는 시간 초과 테스트를 건너뜀 (valgrind 처럼 느린 실행용)
 #
 # 안전 규칙 (예전에 겪은 문제들): 서버 PID 를 직접 저장해서 그것만 종료, 모든 curl 에 --max-time,
@@ -19,8 +20,9 @@ set -u
 E2E_BIN=${E2E_BIN:-build/tiny}
 E2E_WRAP=${E2E_WRAP:-}
 E2E_SKIP_SLOW=${E2E_SKIP_SLOW:-0}
-START_WAIT_S=10
-[ -n "$E2E_WRAP" ] && START_WAIT_S=60 # valgrind 는 시작이 느리다
+E2E_VALGRIND=${E2E_VALGRIND:-0}
+# ASan 빌드라면 종료할 때 LeakSanitizer 가 누수를 검사하도록 (리눅스 기본값이지만 명시)
+export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=1}
 
 cd "$(dirname "$0")/.." || exit 1
 REPO=$(pwd)
@@ -46,10 +48,28 @@ check() { if [ "$2" = "$3" ]; then ok "$1"; else ng "$1" "기대: [$2]  실제: 
 # check_has 이름 찾을문자열 내용
 check_has() { if printf '%s' "$3" | grep -qF -- "$2"; then ok "$1"; else ng "$1" "[$2] 가 없음"; fi; }
 check_lt() { if [ "$3" -lt "$2" ]; then ok "$1"; else ng "$1" "기대: < $2  실제: $3"; fi; }
+# 시간(ms) 기준 검사: valgrind 처럼 느린 실행에서는 건너뜀
+check_time() { if [ "$TIMED" = 1 ]; then check_lt "$@"; else echo "  (건너뜀: 느린 실행) $1"; fi; }
 section() { printf '\n### %s\n' "$1"; }
 
 # ------------------------------------------------------------------ 준비: 임시 폴더
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/tiny-e2e.XXXXXX") || exit 1
+if [ "$E2E_VALGRIND" = 1 ]; then
+    mkdir -p "$WORK/vg"
+    # --leak-check=full          : 누수마다 어디서 할당했는지 보여줌
+    # --show-leak-kinds=all      : definitely/indirectly/possibly lost, still reachable 모두 표시
+    # --errors-for-leak-kinds=definite,indirect : 이 두 종류는 "에러"로 센다
+    # --track-fds=yes            : 종료할 때 열려 있는 fd 목록 (fd 누수 검사)
+    # --error-exitcode=99        : 에러가 있으면 서버 종료 코드를 99 로 → "종료 코드 0" 검사가 실패
+    # --log-file=.../%p.log      : 프로세스(pid)마다 따로 기록
+    E2E_WRAP="valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=definite,indirect \
+--track-fds=yes --error-exitcode=99 --log-file=$WORK/vg/%p.log"
+    E2E_SKIP_SLOW=1
+fi
+START_WAIT_S=10
+[ -n "$E2E_WRAP" ] && START_WAIT_S=60 # valgrind 는 시작이 느리다
+TIMED=1                                # 시간 기준 검사를 할지 (느린 실행에서는 의미가 없다)
+[ -n "$E2E_WRAP" ] && TIMED=0
 ROOT=$WORK/www
 CGI=$WORK/cgi-bin
 cp -r "$REPO/www" "$ROOT"
@@ -242,7 +262,7 @@ EP=$!
 sleep 0.5
 T=$($C -o /dev/null -w '%{http_code} %{time_total}' "$UE/")
 check "일꾼 1개 + 빈 연결 5개 → 새 요청 200" 200 "${T% *}"
-check_lt "그 새 요청이 0.5초 안에 (ms)" 500 "$(awk -v t="${T#* }" 'BEGIN{printf "%d", t*1000}')"
+check_time "그 새 요청이 0.5초 안에 (ms)" 500 "$(awk -v t="${T#* }" 'BEGIN{printf "%d", t*1000}')"
 check "연결 후 1초 쉬고 보낸 요청 → 200" "HTTP/1.1 200 OK" "$( (sleep 1; printf 'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n') | timeout 10 nc -q0 127.0.0.1 "$E_PORT" | first_line)"
 wait "$EP"
 check "빈 연결 5개는 유휴 2초 뒤 응답 없이 닫힘" 5 "$(cat "$WORK/empty.out")"
@@ -304,7 +324,7 @@ check "처리 중이던 요청(2초 CGI)은 200 으로 끝남" "HTTP/1.1 200 OK"
 check_has "그 응답은 Connection: close" "Connection: close" "$(tr -d '\r' < "$WORK/inflight.out")"
 stop_server "$F_PID" TERM
 check "SIGTERM → 정상 종료 (종료 코드 0)" 0 "$STOP_RC"
-check_lt "처리 중 요청을 기다려 약 1.5초 뒤 종료 (ms)" 3000 $(( ($(date +%s%N) - t0) / 1000000 ))
+check_time "처리 중 요청을 기다려 약 1.5초 뒤 종료 (ms)" 3000 $(( ($(date +%s%N) - t0) / 1000000 ))
 check_has "로그: 처리 중 1개 마무리" "처리 중 1개" "$(cat "$F_LOG")"
 
 # ② 쉬는 keep-alive 연결은 기다리지 않고 바로 닫힘
@@ -323,7 +343,7 @@ for i in $(seq 50); do [ -f "$WORK/ka_ready" ] && break; sleep 0.1; done
 stop_server "$G_PID"
 wait "$KP"
 check "쉬던 keep-alive 연결이 종료 때 닫힘" closed "$(awk '{print $1}' "$WORK/ka.out")"
-check_lt "그 연결은 1초 안에 닫힘 (ms)" 1000 "$(awk '{print $2}' "$WORK/ka.out")"
+check_time "그 연결은 1초 안에 닫힘 (ms)" 1000 "$(awk '{print $2}' "$WORK/ka.out")"
 check "정상 종료 (종료 코드 0)" 0 "$STOP_RC"
 
 # ③ 두 번째 신호 → 기다리지 않고 즉시 종료, 실행 중인 CGI 도 정리
@@ -337,10 +357,48 @@ if [ -z "$E2E_WRAP" ]; then
     kill -INT "$H_PID"; sleep 0.2; kill -INT "$H_PID"
     stop_server "$H_PID" 0 # 신호 0 = 아무것도 보내지 않고 끝나기만 기다림 (종료 코드를 거둔다)
     check "두 번째 SIGINT → 즉시 종료 (종료 코드 130)" 130 "$STOP_RC"
-    check_lt "즉시 종료 (ms)" 1500 $(( ($(date +%s%N) - t0) / 1000000 ))
+    check_time "즉시 종료 (ms)" 1500 $(( ($(date +%s%N) - t0) / 1000000 ))
     sleep 0.2
     check "실행 중이던 CGI(forever.sh) 도 정리됨" gone "$([ -n "$CGI_PID" ] && ! kill -0 "$CGI_PID" 2>/dev/null && echo gone)"
     wait "$FP" 2>/dev/null
+fi
+
+# ================================================================== 메모리 검사 집계
+section "메모리 검사"
+# (1) ASan/LSan/UBSan/TSan 보고: 어떤 빌드든 서버 로그에 나오면 안 된다
+SAN=$(cat "$WORK"/*.log 2>/dev/null | grep -aE 'ERROR: AddressSanitizer|ERROR: LeakSanitizer|runtime error:|WARNING: ThreadSanitizer' | head -3)
+check "서버 로그에 sanitizer 보고 없음" "" "$SAN"
+
+# (2) valgrind: 서버 프로세스마다 집계 ("ERROR SUMMARY" 가 있는 로그 = 끝까지 실행된 서버.
+#     CGI 를 위해 fork 한 자식은 exec 순간 valgrind 를 벗어나므로 요약이 없다)
+if [ "$E2E_VALGRIND" = 1 ]; then
+    num() { grep -aE "$1" "$2" | tail -1 | sed -E 's/.*: *([0-9,]+) bytes.*/\1/; s/.*ERROR SUMMARY: ([0-9,]+) errors.*/\1/' | tr -d ','; }
+    printf '  %-10s %8s %12s %12s %12s %12s %10s\n' pid 에러 definitely indirectly possibly reachable "fd열림/상속"
+    VG_N=0
+    for f in "$WORK"/vg/*.log; do
+        grep -q "ERROR SUMMARY" "$f" || continue
+        VG_N=$((VG_N + 1))
+        pid=$(basename "$f" .log)
+        e=$(num 'ERROR SUMMARY' "$f")
+        d=$(num 'definitely lost:' "$f"); d=${d:-0}
+        i=$(num 'indirectly lost:' "$f"); i=${i:-0}
+        p=$(num 'possibly lost:' "$f"); p=${p:-0}
+        r=$(num 'still reachable:' "$f"); r=${r:-0}
+        # 예: "FILE DESCRIPTORS: 3 open (3 inherited) at exit."  (옛 버전은 "(3 std)")
+        #     → "열린 수/물려받은 수". 물려받은 3개(표준 입출력)만 열려 있어야 정상
+        fds=$(grep -aE 'FILE DESCRIPTORS: [0-9]+ open' "$f" | tail -1 |
+              sed -E 's/.*FILE DESCRIPTORS: ([0-9]+) open \(([0-9]+) (inherited|std)\).*/\1\/\2/')
+        printf '  %-10s %8s %12s %12s %12s %12s %10s\n' "$pid" "$e" "$d" "$i" "$p" "$r" "$fds"
+        check "valgrind[$pid] 메모리 에러 0" 0 "$e"
+        check "valgrind[$pid] definitely lost 0" 0 "$d"
+        check "valgrind[$pid] indirectly lost 0" 0 "$i"
+        # 즉시 종료(_exit) 같은 경우가 아니면, 표준 입출력 3개 외에 열린 fd 가 없어야 한다
+        check "valgrind[$pid] 종료 때 열린 fd = 물려받은 표준 입출력 3개뿐" "3/3" "$fds"
+    done
+    if [ "$VG_N" -ge 1 ]; then ok "valgrind 로 끝까지 실행된 서버 ${VG_N}개 집계"; else ng "valgrind 요약을 찾지 못함"; fi
+    rm -rf "$REPO/build/valgrind-logs"
+    mkdir -p "$REPO/build/valgrind-logs" && cp "$WORK"/vg/*.log "$REPO/build/valgrind-logs/" 2>/dev/null
+    echo "  (전체 valgrind 로그: build/valgrind-logs/)"
 fi
 
 # ------------------------------------------------------------------ 결과

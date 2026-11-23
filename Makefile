@@ -4,14 +4,17 @@
 #   make test   : 단위 테스트 빌드 + 실행 (하나라도 실패하면 make가 실패)
 #   make asan   : AddressSanitizer/UBSan 빌드 (build/tiny-asan) + 단위 테스트 실행
 #   make e2e    : 실제 서버를 띄우고 curl 로 기능 확인 (tests/e2e.sh)
-#                 make e2e E2E_BIN=build/tiny-asan  → ASan 서버로
+#                 make e2e E2E_BIN=build/tiny-asan  → ASan 서버로 (종료 때 LeakSanitizer 누수 검사)
+#   make valgrind : 디버그 빌드(build/tiny-debug)를 valgrind 로 감싸 e2e 실행 → 누수/메모리 오류/fd 집계
 #   make clean  : build/ 삭제
 
 CC      ?= cc
 BUILD   := build
 
 # 공통 옵션: C11 + POSIX 함수 사용, 경고는 모두 켜고 경고=에러로 취급
-CFLAGS_COMMON := -std=c11 -D_POSIX_C_SOURCE=200809L \
+#   _XOPEN_SOURCE=700: POSIX 2008 + X/Open(XSI) 확장. glibc 는 realpath 를 이 모드에서만 선언한다
+#   (-O2 에서는 _FORTIFY_SOURCE 헤더가 우연히 선언해 줘서 가려져 있었다 → -O0 디버그 빌드에서 발견)
+CFLAGS_COMMON := -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
                  -Wall -Wextra -Werror -pthread -Isrc -MMD -MP
 CFLAGS_REL    := -O2
 CFLAGS_ASAN   := -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
@@ -32,7 +35,7 @@ ASAN_OBJS      := $(SRCS:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD)/asan/tests/%)
 
-.PHONY: all test asan e2e clean
+.PHONY: all test asan e2e valgrind clean
 
 # 테스트용 .o 같은 중간 파일을 make 가 자동 삭제하지 않게 한다 (재빌드 방지)
 .SECONDARY:
@@ -44,7 +47,7 @@ CGI_BINS := $(CGI_SRCS:.c=)
 all: $(BUILD)/tiny $(CGI_BINS)
 
 cgi-bin/%: cgi-bin/%.c
-	$(CC) -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -O2 $< -o $@
+	$(CC) -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -Wall -Wextra -Werror -O2 $< -o $@
 
 # ---------- 일반 빌드 ----------
 $(BUILD)/tiny: $(OBJS)
@@ -88,15 +91,28 @@ test: $(TEST_BINS)
 asan: $(BUILD)/tiny-asan $(ASAN_TEST_BINS)
 	$(call run_tests,$(ASAN_TEST_BINS))
 
+# ---------- 디버그 빌드 (valgrind 용: 최적화 없이 + 줄 번호 정보) ----------
+DEBUG_OBJS := $(SRCS:%.c=$(BUILD)/debug/obj/%.o)
+
+$(BUILD)/tiny-debug: $(DEBUG_OBJS)
+	$(CC) $^ -o $@ $(LDFLAGS)
+
+$(BUILD)/debug/obj/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS_COMMON) -g -O0 -c $< -o $@
+
 # ---------- 기능 테스트 (e2e) ----------
 E2E_BIN ?= $(BUILD)/tiny
 
 e2e: $(E2E_BIN) $(CGI_BINS)
 	E2E_BIN=$(E2E_BIN) bash tests/e2e.sh
 
+valgrind: $(BUILD)/tiny-debug $(CGI_BINS)
+	E2E_BIN=$(BUILD)/tiny-debug E2E_VALGRIND=1 bash tests/e2e.sh
+
 clean:
 	rm -rf $(BUILD) $(CGI_BINS)
 
 # 헤더 파일 변경 시 자동 재컴파일을 위한 의존성 파일
--include $(OBJS:.o=.d) $(ASAN_OBJS:.o=.d) \
+-include $(OBJS:.o=.d) $(ASAN_OBJS:.o=.d) $(DEBUG_OBJS:.o=.d) \
          $(TEST_SRCS:%.c=$(BUILD)/obj/%.d) $(TEST_SRCS:%.c=$(BUILD)/asan/obj/%.d)
