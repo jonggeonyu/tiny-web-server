@@ -315,6 +315,33 @@ static void test_no_fd_leak(void)
     CHECK_EQ_STR(body_of(), "0\n1\n2\n3\n");
 }
 
+static void test_client_gone_during_cgi(void)
+{
+    /* CGI 가 도는 동안 클라이언트가 사라짐 → 응답 전송은 실패하지만,
+     * CGI 는 끝까지 회수되고(좀비 없음) 서버(이 함수)는 정상적으로 돌아와야 한다 */
+    char raw[] = "GET /cgi-bin/noread.sh HTTP/1.1\r\nHost: t\r\n\r\n";
+    CHECK_EQ_INT(http_parse_request(raw, strlen(raw), &req), HTTP_PARSE_OK);
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    close(sv[1]); /* 클라이언트가 이미 끊음 */
+
+    http_writer w;
+    writer_init(&w, sv[0]);
+    http_body hb = {NULL, 0};
+    request_ctx ctx = {
+        .req = &req, .path = req.path, .body = &hb, .cfg = &cfg,
+        .remote_addr = "127.0.0.1", .remote_port = 1234,
+    };
+    cgi_serve(&ctx, &w);
+    close(sv[0]);
+
+    CHECK_EQ_INT(w.failed, 1); /* 응답을 보내다 실패 (EPIPE) */
+    int st;
+    errno = 0;
+    CHECK_EQ_INT(waitpid(-1, &st, WNOHANG), -1); /* 남은 자식 없음 */
+    CHECK_EQ_INT(errno, ECHILD);
+}
+
 static void test_no_zombies_left(void)
 {
     /* 이 테스트 프로세스의 자식 중 끝났는데 회수 안 된 것이 있으면 waitpid(-1, WNOHANG) 가 그 pid 를 준다 */
@@ -338,6 +365,7 @@ int main(void)
     RUN_TEST(test_status_passthrough);
     RUN_TEST(test_forbidden_and_missing);
     RUN_TEST(test_no_fd_leak);
+    RUN_TEST(test_client_gone_during_cgi);
     RUN_TEST(test_no_zombies_left);
     teardown();
     free(got);

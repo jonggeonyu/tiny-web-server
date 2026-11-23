@@ -298,3 +298,63 @@ main → server → threadpool → conn → router → handler_static / handler_
 8. **설정 구조체 확장 가능하게**: `config`에 나중에 `routes[]`, `backends[]`를 추가할 자리를 고려. CLI 인자 외에 설정 파일 읽기(`-f`)를 넣기 쉬운 구조.
 9. **타임아웃을 설정값으로**: 클라이언트 읽기 타임아웃을 상수 대신 config로 → 백엔드 응답 타임아웃(→ 502/504)에도 같은 방식 적용.
 10. **에러 응답 함수 일반화**: `send_error(writer, status)`가 상태코드 표를 사용 → 502/504 추가가 한 줄로 끝나게.
+
+---
+
+## 6. 엣지 케이스 ↔ 테스트 대응표 (PROJECT.md "품질" 항목, 10-5)
+
+- 단위: `make test` (파일 → 함수 이름) / e2e: `make e2e` (섹션 → 항목 이름, 실제 서버)
+- 메모리: `make e2e E2E_BIN=build/tiny-asan` (LeakSanitizer), `make valgrind`
+
+### 잘못된 HTTP 요청
+| 경우 | 단위 테스트 | e2e |
+|---|---|---|
+| 불완전한 헤더 (덜 옴) | `test_http_parser`: `test_incomplete_every_prefix` (한 글자씩 잘라 모두 "덜 옴") | — |
+| 불완전한 헤더 (보내다 멈춤) | `test_conn`: `test_idle_partial_header` → 408 | 잘못된 요청: "헤더 보내다 멈춤 → 408 (유휴 2초)" |
+| 불완전한 헤더 (찔끔찔끔) | `test_conn`: `test_total_deadline_trickle` → 408 (요청 전체 마감) | — |
+| 형식이 깨진 요청 라인 | `test_http_parser`: `test_400_request_line`, `test_bad_request_line_detected_early` | 잘못된 요청: "GARBAGE → 400" |
+| 잘못된 헤더 줄 / 의미 | `test_http_parser`: `test_400_headers`, `test_400_semantics` (Host, Content-Length 충돌, CL+TE) | 잘못된 요청: "Host 없음 → 400", "Content-Length 두 개가 다름 → 400", "%zz → 400" |
+| 비정상 메서드 | `test_http_parser`: `test_501_not_implemented` (DELETE, PUT, 소문자, chunked) | 잘못된 요청: "DELETE → 501", "get (소문자 메서드) → 501", "Transfer-Encoding: chunked → 501" |
+| 잘못된 버전 | `test_http_parser`: `test_505_version`, `test_400_request_line` (형식 오류) | 잘못된 요청: "HTTP/2.0 → 505", "http/1.1 (소문자) → 400" |
+| 경로 탈출 | `test_path`: `test_escape_root`, `test_is_inside` / `test_static`: `test_escape_blocked` | 정적 파일: "../ → 403", "%2e%2e → 403", "루트 밖 심볼릭 링크 → 403", "루트 밖 내용이 새지 않음" |
+
+### 매우 큰 요청 본문 / 매우 긴 URI
+| 경우 | 단위 테스트 | e2e |
+|---|---|---|
+| Content-Length > 1MiB (읽기 전 거절) | `test_conn`: `test_413_before_reading`, `test_expect_too_large` | POST 본문: "2MB → 413", "2MB: 본문을 보내지 않고 끝남" |
+| 큰 본문을 실제로 끝까지 보냄 | — | 갑작스러운 연결 종료: "Expect 없이 2MB 를 다 보내도 413 을 온전히 받음" |
+| Content-Length 19자리 | `test_http_parser`: `test_413_huge_content_length` | 잘못된 요청: "Content-Length 19자리 → 413" |
+| 매우 긴 URI | `test_http_parser`: `test_414_uri_too_long` (4096 OK / 4097 414 / 8KB 한 줄) | 잘못된 요청: "URI 5000자 → 414" |
+| 헤더가 너무 큼 / 많음 | `test_http_parser`: `test_431_headers_too_large` (8KB, 64개 OK / 65개 431) | 잘못된 요청: "헤더 9000바이트 → 431" |
+| 최대 크기 본문 정확히 | `test_conn`: `test_echo_large_binary` | POST 본문: "정확히 1MiB echo" |
+
+### 백엔드 응답 없음 / 타임아웃
+1단계에는 프록시가 없어서, 같은 성격인 **CGI(서버 뒤에서 응답을 만드는 프로그램)**로 확인한다. 2단계 프록시에서 같은 형식(502/504)으로 추가할 예정.
+
+| 경우 | 단위 테스트 | e2e |
+|---|---|---|
+| 끝나지 않음 → 504 + 강제 종료 + 회수 | `test_handler_cgi`: `test_timeout_504_and_reaped` | CGI: "forever.sh → 504 (시간 초과)" |
+| 출력은 닫고 안 끝남 → 504 | `test_handler_cgi`: `test_closed_output_but_running` | — |
+| 죽음 / 잘못된 출력 / 너무 큰 출력 → 502 | `test_handler_cgi`: `test_502_cases` | CGI: "crash.sh → 502", "badoutput.sh → 502" |
+| 입력과 출력이 모두 큼 (교착) | `test_handler_cgi`: `test_no_deadlock_big_in_big_out` | CGI: "1MiB 넣으며 1MiB 받기 (교착 없음)" |
+
+### 클라이언트의 갑작스러운 연결 종료
+| 경우 | 단위 테스트 | e2e |
+|---|---|---|
+| 헤더 도중 (FIN / RST) | `test_conn`: `test_idle_partial_header` | 갑작스러운 연결 종료: "헤더 도중 RST → 서버 정상" |
+| 본문 업로드 도중 (FIN / RST) | `test_conn`: `test_body_truncated` → 400 | POST 본문: "본문이 덜 오고 끊김 → 400" / 갑작스러운 연결 종료: "본문 업로드 도중 RST → 서버 정상" |
+| 응답 받는 도중 | `test_netio`: `test_write_to_closed_peer` (EPIPE, 서버 생존) | 갑작스러운 연결 종료: "3MB 응답 받는 도중 RST → 서버 정상", "그 연결은 '응답이 중간에 끊김' 으로 정리" |
+| 응답을 안 받아 감 (쓰기 멈춤) | `test_conn`: `test_write_timeout_slow_reader` | — (실제 10초 확인은 Step 8 에서 수동으로) |
+| CGI 실행 중 떠남 | `test_handler_cgi`: `test_client_gone_during_cgi` | 갑작스러운 연결 종료: "CGI 실행 중 클라이언트가 떠남 (curl 시간 초과 = 28)", "그 CGI 도 회수됨 (자식 0개)" |
+| keep-alive 로 쉬다가 닫음 | `test_keepalive`: `test_peer_close` | — |
+| 빈 연결로 버팀 | `test_keepalive`: `test_idle_timeout`, `test_per_connection_timeout` | 빈 연결: "빈 연결 5개는 유휴 2초 뒤 응답 없이 닫힘", "빈 연결에는 408 을 보내지 않음 (로그에 408 없음)" |
+| 에러 응답 뒤 닫기 (남은 입력) | `test_linger`: 3개 전부 | 동시 처리: "일꾼 1, 대기열 1 이 다 찼을 때 → 503" (응답이 지워지지 않고 도착) |
+
+### 그 밖에 추가로 확인한 상황
+| 경우 | 단위 테스트 | e2e |
+|---|---|---|
+| fd 고갈 (EMFILE) | — | fd 고갈: "fd 가 바닥난 동안에도 서버 프로세스는 살아 있음", "연결이 닫힌 뒤 다시 정상 처리", "고갈 로그는 1초에 한 번 이하로 제한 (줄 수)" |
+| 과부하 (대기열 가득) | `test_threadpool`: `test_queue_full_rejects` | 동시 처리: "일꾼 1, 대기열 1 이 다 찼을 때 → 503", "503 의 Retry-After" |
+| 종료 신호 | — | 안전한 종료: "처리 중이던 요청(2초 CGI)은 200 으로 끝남", "두 번째 SIGINT → 즉시 종료 (종료 코드 130)", "실행 중이던 CGI(forever.sh) 도 정리됨" |
+| 좀비 / fd 누출 | `test_handler_cgi`: `test_no_zombies_left`, `test_no_fd_leak` | CGI: "CGI 의 fd 는 0,1,2,3 뿐" / 마무리 점검: "자식 프로세스(좀비 포함) 없음", "열린 fd 수가 시작 때와 같음" |
+| 메모리 누수 / 오류 | `make asan` (단위 테스트마다 종료 시 LeakSanitizer) | 메모리 검사: "서버 로그에 sanitizer 보고 없음", `make valgrind` 의 "valgrind[pid] definitely lost 0" 등 |

@@ -180,8 +180,19 @@ static void accept_one(int listen_fd, threadpool *tp, const server_config *cfg, 
         int err = errno;
         if (err == EINTR || err == ECONNABORTED || err == EAGAIN || err == EWOULDBLOCK)
             return; /* 일시적인 실패 (poll 뒤에 상대가 바로 끊은 경우 등) */
-        char eb[128];
-        fprintf(stderr, "[main] accept 실패: %s\n", net_errstr(err, eb, sizeof(eb)));
+        /* 같은 에러가 계속되면(fd 고갈 등) 로그가 쏟아지지 않게 1초에 한 번만 쓰고, 생략한 횟수를 함께 적는다 */
+        static long long last_log_ms = 0; /* accept 스레드 하나만 쓰므로 static 이어도 안전 */
+        static long long suppressed = 0;
+        long long now = net_now_ms();
+        if (now - last_log_ms >= 1000) {
+            char eb[128];
+            fprintf(stderr, "[main] accept 실패: %s (그사이 같은 실패 %lld번 생략)\n",
+                    net_errstr(err, eb, sizeof(eb)), suppressed);
+            last_log_ms = now;
+            suppressed = 0;
+        } else {
+            suppressed++;
+        }
         if (err == EMFILE || err == ENFILE) {
             /* fd 가 바닥남: 바로 다시 accept 하면 같은 에러로 CPU 만 태운다 → 잠깐 쉰다 */
             struct timespec ts = {0, 50 * 1000000L};

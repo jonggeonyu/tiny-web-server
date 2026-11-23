@@ -95,8 +95,13 @@ start_server() {
     local name=$1; shift
     local port; port=$(free_port)
     local log=$WORK/$name.log
-    # shellcheck disable=SC2086
-    $E2E_WRAP "$E2E_BIN" -p "$port" -r "$ROOT" -c "$CGI" "$@" > "$log" 2>&1 &
+    if [ -n "${NOFILE:-}" ]; then
+        # fd 한도를 낮춘 채 실행 (exec 하므로 pid 는 서버 자신)
+        bash -c 'ulimit -n "$1"; shift; exec "$@"' _ "$NOFILE" "$E2E_BIN" -p "$port" -r "$ROOT" -c "$CGI" "$@" > "$log" 2>&1 &
+    else
+        # shellcheck disable=SC2086
+        $E2E_WRAP "$E2E_BIN" -p "$port" -r "$ROOT" -c "$CGI" "$@" > "$log" 2>&1 &
+    fi
     local pid=$!
     SRV_PIDS+=("$pid")
     printf -v "${name}_PID" '%s' "$pid"
@@ -238,6 +243,49 @@ check "마지막만 Connection: close" "keep-alive keep-alive close" "$(printf '
 check "HTTP/1.0 기본은 닫기 → 응답 1개" 1 "$(printf 'GET / HTTP/1.0\r\n\r\nGET / HTTP/1.0\r\n\r\n' | raw "$S_PORT" | grep -ac '^HTTP/1.1')"
 check "404 뒤에도 연결 유지 → 응답 2개" 2 "$(printf 'GET /nope HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' | raw "$S_PORT" | grep -ac '^HTTP/1.1')"
 
+# ================================================================== 갑작스러운 연결 종료
+section "갑작스러운 연결 종료"
+# 클라이언트 흉내: RST(강제 종료)로 끊기 등. curl 로는 만들기 어려워서 작은 python 도우미를 쓴다
+cat > "$WORK/abrupt.py" <<'PYEOF'
+import socket, struct, sys, time
+port, mode = int(sys.argv[1]), sys.argv[2]
+s = socket.create_connection(("127.0.0.1", port))
+def rst():  # SO_LINGER(켜기, 0초) 로 닫으면 FIN 대신 RST: "강제로 끊음"
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)); s.close()
+if mode == "header":      # 헤더를 보내다 RST
+    s.sendall(b"GET / HTTP/1.1\r\nHo"); time.sleep(0.2); rst()
+elif mode == "body":      # 본문 업로드 도중 RST
+    s.sendall(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n" + b"x" * 1000); time.sleep(0.2); rst()
+elif mode == "response":  # 3MB 응답을 조금만 받고 RST
+    s.sendall(b"GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n"); s.recv(10000); rst()
+elif mode == "bigbody":   # Expect 없이 2MB 를 끝까지 보냄 → 413 을 온전히 받아야 함
+    s.sendall(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 2000000\r\n\r\n")
+    try:
+        s.sendall(b"x" * 2000000)
+    except OSError:
+        pass  # 서버가 거절 후 닫았으면 보내기가 중간에 실패할 수 있다
+    s.settimeout(5)
+    try:
+        print(s.recv(100).split(b"\r\n")[0].decode())
+    except OSError as e:
+        print("recv 실패:", type(e).__name__)
+PYEOF
+timeout 10 python3 -I "$WORK/abrupt.py" "$S_PORT" header
+check "헤더 도중 RST → 서버 정상" 200 "$(status "$U/")"
+timeout 10 python3 -I "$WORK/abrupt.py" "$S_PORT" body
+check "본문 업로드 도중 RST → 서버 정상" 200 "$(status "$U/")"
+timeout 10 python3 -I "$WORK/abrupt.py" "$S_PORT" response
+sleep 0.3
+check "3MB 응답 받는 도중 RST → 서버 정상" 200 "$(status "$U/")"
+check_has "그 연결은 '응답이 중간에 끊김' 으로 정리" "응답이 중간에 끊김" "$(cat "$S_LOG")"
+check "Expect 없이 2MB 를 다 보내도 413 을 온전히 받음" "HTTP/1.1 413 Content Too Large" "$(timeout 15 python3 -I "$WORK/abrupt.py" "$S_PORT" bigbody)"
+# CGI 가 도는 동안 클라이언트가 포기하고 떠남 → CGI 는 끝까지 회수, 좀비 없음
+$C --max-time 0.5 -o /dev/null "$U/cgi-bin/slow.sh"
+check "CGI 실행 중 클라이언트가 떠남 (curl 시간 초과 = 28)" 28 "$?"
+sleep 2.5
+check "그 CGI 도 회수됨 (자식 0개)" 0 "$(ps --ppid "$S_PID" --no-headers | wc -l)"
+check "그 뒤에도 서버 정상" 200 "$(status "$U/")"
+
 # ================================================================== 빈 연결
 section "빈 연결 (첫 요청 전)"
 start_server E -t 1 -T 2 || exit 1
@@ -294,6 +342,38 @@ check_has "503 의 Retry-After" "Retry-After: 1" "$($C -i "$UB/" | tr -d '\r')"
 wait "$p1" "$p2"
 check "대기열이 빈 뒤 → 200" 200 "$(status "$UB/")"
 stop_server "$B_PID"
+
+# ================================================================== fd 고갈
+section "fd 고갈 (ulimit -n 64)"
+if [ -n "$E2E_WRAP" ]; then
+    echo "  (건너뜀: valgrind 는 자기 fd 가 필요해서 한도를 낮춘 실행과 맞지 않음)"
+else
+    NOFILE=64 start_server L || exit 1
+    UL=http://127.0.0.1:$L_PORT
+    # 아무것도 보내지 않는 연결 100개 → 서버의 fd(64개)가 바닥난다
+    timeout 20 python3 -I -c '
+import socket, sys, time
+socks = []
+for i in range(100):
+    try:
+        socks.append(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2))
+    except OSError:
+        break
+open(sys.argv[2], "w").write(str(len(socks)))
+time.sleep(3)
+' "$L_PORT" "$WORK/fdcount" &
+    FDP=$!
+    sleep 1.5
+    check "fd 가 바닥난 동안에도 서버 프로세스는 살아 있음" yes "$(kill -0 "$L_PID" 2>/dev/null && echo yes)"
+    wait "$FDP"
+    check "연결 100개를 모두 맺음 (커널 대기열에서 기다림)" 100 "$(cat "$WORK/fdcount")"
+    sleep 0.5
+    check "연결이 닫힌 뒤 다시 정상 처리" 200 "$(status "$UL/")"
+    check_has "로그에 fd 고갈이 기록됨" "Too many open files" "$(cat "$L_LOG")"
+    check_lt "고갈 로그는 1초에 한 번 이하로 제한 (줄 수)" 8 "$(grep -c 'accept 실패' "$L_LOG")"
+    stop_server "$L_PID"
+    check "fd 고갈을 겪은 서버도 정상 종료 (종료 코드 0)" 0 "$STOP_RC"
+fi
 
 # ================================================================== 마무리 점검
 section "마무리 점검 (주 서버)"
