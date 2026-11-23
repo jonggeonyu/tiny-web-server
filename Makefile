@@ -3,6 +3,8 @@
 #   make        : 서버 빌드 (build/tiny)
 #   make test   : 단위 테스트 빌드 + 실행 (하나라도 실패하면 make가 실패)
 #   make asan   : AddressSanitizer/UBSan 빌드 (build/tiny-asan) + 단위 테스트 실행
+#   make e2e    : 실제 서버를 띄우고 curl 로 기능 확인 (tests/e2e.sh)
+#                 make e2e E2E_BIN=build/tiny-asan  → ASan 서버로
 #   make clean  : build/ 삭제
 
 CC      ?= cc
@@ -30,7 +32,7 @@ ASAN_OBJS      := $(SRCS:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD)/asan/tests/%)
 
-.PHONY: all test asan clean
+.PHONY: all test asan e2e clean
 
 # 테스트용 .o 같은 중간 파일을 make 가 자동 삭제하지 않게 한다 (재빌드 방지)
 .SECONDARY:
@@ -85,6 +87,12 @@ test: $(TEST_BINS)
 
 asan: $(BUILD)/tiny-asan $(ASAN_TEST_BINS)
 	$(call run_tests,$(ASAN_TEST_BINS))
+
+# ---------- 기능 테스트 (e2e) ----------
+E2E_BIN ?= $(BUILD)/tiny
+
+e2e: $(E2E_BIN) $(CGI_BINS)
+	E2E_BIN=$(E2E_BIN) bash tests/e2e.sh
 
 clean:
 	rm -rf $(BUILD) $(CGI_BINS)
