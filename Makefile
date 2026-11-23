@@ -6,6 +6,7 @@
 #   make e2e    : 실제 서버를 띄우고 curl 로 기능 확인 (tests/e2e.sh)
 #                 make e2e E2E_BIN=build/tiny-asan  → ASan 서버로 (종료 때 LeakSanitizer 누수 검사)
 #   make valgrind : 디버그 빌드(build/tiny-debug)를 valgrind 로 감싸 e2e 실행 → 누수/메모리 오류/fd 집계
+#   make bench  : ab/wrk 부하 측정 → build/bench/results.md (tests/bench.sh)
 #   make clean  : build/ 삭제
 
 CC      ?= cc
@@ -35,7 +36,7 @@ ASAN_OBJS      := $(SRCS:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD)/asan/tests/%)
 
-.PHONY: all test asan e2e valgrind clean
+.PHONY: all test asan e2e valgrind bench clean
 
 # 테스트용 .o 같은 중간 파일을 make 가 자동 삭제하지 않게 한다 (재빌드 방지)
 .SECONDARY:
@@ -109,6 +110,10 @@ e2e: $(E2E_BIN) $(CGI_BINS)
 
 valgrind: $(BUILD)/tiny-debug $(CGI_BINS)
 	E2E_BIN=$(BUILD)/tiny-debug E2E_VALGRIND=1 bash tests/e2e.sh
+
+# ---------- 부하 측정 ----------
+bench: $(BUILD)/tiny $(CGI_BINS)
+	bash tests/bench.sh
 
 clean:
 	rm -rf $(BUILD) $(CGI_BINS)
