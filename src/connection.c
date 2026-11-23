@@ -1,4 +1,4 @@
-/* 연결 처리 (F2~F5 연결부, F6 정적 파일 전송, F9) */
+/* 연결 처리 (F2~F5 연결부, F4 POST 본문, F6 정적 파일 전송, F9) */
 #include "connection.h"
 #include "files.h"
 #include "http.h"
@@ -7,12 +7,16 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
 
-static int send_placeholder(int connfd, const HttpRequest *request);
+static int serve_post(int connfd, Rio *rio, const HttpRequest *request);
+static int read_body(Rio *rio, const HttpRequest *request, char *body);
+static int send_placeholder(int connfd, const HttpRequest *request,
+                            size_t body_length);
 static int serve_static(int connfd, const char *root, const char *uri);
 static int find_static_file(const char *root, const char *uri,
                             StaticFile *file);
@@ -43,14 +47,13 @@ int connection_serve(int connfd, const char *root)
     if (status != 200) {
         return send_error_and_linger(connfd, status);
     }
-    /* 본문을 안 읽고 닫으면 커널이 RST를 보내 클라이언트가 응답을 못 받을 수
-     * 있다. 그래서 본문 처리(F4) 전까지는 읽어서 버린다 */
+    if (request.method == HTTP_POST) {
+        return serve_post(connfd, &rio, &request);
+    }
+    /* GET에 본문이 붙어 오면 쓰지 않는다. 그래도 안 읽고 닫으면 커널이 RST를
+     * 보내 클라이언트가 응답을 못 받을 수 있어서 읽어서 버린다 */
     if (discard_body(&rio, request.content_length) < 0) {
         return -1;
-    }
-    if (request.method == HTTP_POST) {
-        /* POST 본문 처리(F4)와 CGI(F10)가 붙기 전까지는 임시 응답 */
-        return send_placeholder(connfd, &request);
     }
     return serve_static(connfd, root, request.uri);
 }
@@ -59,17 +62,59 @@ int connection_serve(int connfd, const char *root)
  * 도우미: 이 파일 안에서만 쓴다. 전부 static.
  * ------------------------------------------------------------------------- */
 
-/* 정적 파일(F6)이 붙기 전까지 파싱 결과를 그대로 보여주는 임시 응답 */
-static int send_placeholder(int connfd, const HttpRequest *request)
+/* POST 본문을 끝까지 읽는다 (F4). 버퍼는 클라이언트가 말한 길이가 아니라
+ * 한도(MAX_BODY_BYTES) 크기로 고정해서 잡는다. 파서가 이미 한도 초과를
+ * 413으로 끊었으므로 content_length는 이 안에 들어간다.
+ * CGI(F10)가 붙기 전까지는 받은 바이트 수를 보여주는 임시 응답을 보낸다. */
+static int serve_post(int connfd, Rio *rio, const HttpRequest *request)
+{
+    char *body = malloc(MAX_BODY_BYTES);
+    if (body == NULL) {
+        (void)report_errno("allocate body buffer");
+        return send_error_and_linger(connfd, 500);
+    }
+
+    int result = read_body(rio, request, body);
+    if (result == 0) {
+        result = send_placeholder(connfd, request,
+                                  (size_t)request->content_length);
+    }
+    free(body);
+    return result;
+}
+
+/* Content-Length만큼 body에 읽는다. rio로 헤더를 읽었으므로 본문도 같은
+ * rio로 읽어야 버퍼에 먼저 들어온 본문 앞부분을 잃지 않는다.
+ * 반환: 0, 덜 왔는데 끊김·읽기 실패 -1 (원인은 여기서 찍는다) */
+static int read_body(Rio *rio, const HttpRequest *request, char *body)
+{
+    size_t length = (size_t)request->content_length;
+
+    ssize_t n = rio_readnb(rio, body, length);
+    if (n < 0) {
+        return report_errno("read body");
+    }
+    if ((size_t)n < length) {
+        fprintf(stderr, "warn: client closed during body "
+                "(got %zd of %zu bytes)\n", n, length);
+        return -1;
+    }
+    return 0;
+}
+
+/* CGI(F10)가 붙기 전까지 POST 요청의 파싱 결과를 보여주는 임시 응답 */
+static int send_placeholder(int connfd, const HttpRequest *request,
+                            size_t body_length)
 {
     char body[MAX_RESPONSE_HEAD];
 
     int length = snprintf(body, sizeof(body),
                           "method: %s\nuri: %s\nversion: HTTP/1.%d\n"
-                          "headers: %zu\ncontent-length: %ld\n",
+                          "headers: %zu\ncontent-length: %ld\n"
+                          "body-bytes: %zu\n",
                           request->method_text, request->uri,
                           request->version_minor, request->header_count,
-                          request->content_length);
+                          request->content_length, body_length);
     if (length < 0) {
         return -1;
     }

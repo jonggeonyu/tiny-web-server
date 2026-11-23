@@ -120,6 +120,10 @@ int http_finish_headers(HttpRequest *request)
     if (status != 200) {
         return status;
     }
+    /* 본문 길이를 모르면 어디까지가 본문인지 알 수 없다 (F4) */
+    if (request->method == HTTP_POST && !request->has_content_length) {
+        return 411;
+    }
     request->keep_alive = decide_keep_alive(request);
     return 200;
 }
@@ -376,7 +380,7 @@ static char *store_text(HttpRequest *request, const char *text,
 /* Content-Length를 찾아 has_content_length와 content_length를 채운다.
  * 여러 개면 값이 모두 같아야 한다 (RFC 7230 3.3.2).
  * 숫자가 아니면 400, 한도를 넘으면 413. 헤더가 없으면 has_content_length는
- * false, content_length는 0 (POST면 F4에서 411로 처리). */
+ * false, content_length는 0 (POST면 http_finish_headers가 411로 끊는다). */
 static int parse_content_length(HttpRequest *request)
 {
     long found = -1;

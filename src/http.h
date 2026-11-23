@@ -52,8 +52,8 @@ int http_parse_header_line(const char *line, HttpRequest *request);
 
 /* 헤더를 다 받은 뒤 검사하고 has_content_length, content_length,
  * keep_alive를 정한다.
- * 반환: 200, Host 없음·잘못된 Content-Length 400, 본문 초과 413,
- *       Transfer-Encoding 501 */
+ * 반환: 200, Host 없음·잘못된 Content-Length 400, POST인데
+ *       Content-Length 없음 411, 본문 초과 413, Transfer-Encoding 501 */
 int http_finish_headers(HttpRequest *request);
 
 /* 이름으로 헤더 값을 찾는다 (대소문자 무시). 없으면 NULL. */
