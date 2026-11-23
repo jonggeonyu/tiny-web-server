@@ -3,3 +3,5 @@ labs/
 build/
 *.d
 cgi-bin/adder
+PLAN.md
+PROJECT.md
