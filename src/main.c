@@ -83,6 +83,8 @@ int main(int argc, char **argv)
     cfg.request_timeout_ms = DEFAULT_REQUEST_TIMEOUT_MS;
     cfg.cgi_timeout_ms = DEFAULT_CGI_TIMEOUT_MS;
     cfg.write_timeout_ms = DEFAULT_WRITE_TIMEOUT_MS;
+    cfg.keepalive_timeout_ms = DEFAULT_KEEPALIVE_TIMEOUT_MS;
+    cfg.max_requests = DEFAULT_MAX_REQUESTS;
     cfg.threads = default_threads();
     cfg.queue_size = 0; /* 0 = 일꾼 수에 맞춰 아래에서 계산 */
     const char *root_arg = DEFAULT_ROOT;
@@ -167,7 +169,8 @@ int main(int argc, char **argv)
 
     printf("서버 시작: http://localhost:%d  루트: %s  CGI: %s\n", cfg.port, cfg.root,
            cfg.cgi_dir[0] ? cfg.cgi_dir : "(꺼짐)");
-    printf("  일꾼 %d개, 대기열 %d칸  (종료: Ctrl+C)\n", cfg.threads, cfg.queue_size);
+    printf("  일꾼 %d개, 대기열 %d칸, keep-alive 유휴 %d초 / 연결당 최대 %d요청  (종료: Ctrl+C)\n",
+           cfg.threads, cfg.queue_size, cfg.keepalive_timeout_ms / 1000, cfg.max_requests);
     fflush(stdout);
 
     server_run(listen_fd, &cfg);

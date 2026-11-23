@@ -10,16 +10,17 @@
 #ifndef THREADPOOL_H
 #define THREADPOOL_H
 
-/* 일꾼이 할 일: 대기열에서 꺼낸 fd 하나를 처리한다 */
-typedef void (*tp_job_fn)(int fd, void *arg);
+/* 일꾼이 할 일: 대기열에서 꺼낸 fd 하나를 처리한다.
+ * tag: fd 와 함께 넣은 숫자 (서버에서는 "이 연결에서 이미 처리한 요청 수") */
+typedef void (*tp_job_fn)(int fd, int tag, void *arg);
 
 typedef struct threadpool threadpool;
 
 /* nthreads 개의 일꾼과 queue_cap 칸짜리 대기열을 만든다. 실패 시 NULL */
 threadpool *threadpool_create(int nthreads, int queue_cap, tp_job_fn fn, void *arg);
 
-/* 대기열에 fd 를 넣는다. 반환: 0 = 넣음, -1 = 가득 참 또는 종료 중 (fd 는 호출자가 처리) */
-int threadpool_submit(threadpool *tp, int fd);
+/* 대기열에 (fd, tag) 를 넣는다. 반환: 0 = 넣음, -1 = 가득 참 또는 종료 중 (fd 는 호출자가 처리) */
+int threadpool_submit(threadpool *tp, int fd, int tag);
 
 /* 대기열에 남은 일까지 모두 처리한 뒤 일꾼을 끝내고 정리한다 */
 void threadpool_destroy(threadpool *tp);

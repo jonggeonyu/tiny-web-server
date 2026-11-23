@@ -43,7 +43,7 @@ static void *server_thread(void *arg)
     pthread_mutex_lock(&done_mu);
     server_done = 0;
     pthread_mutex_unlock(&done_mu);
-    conn_handle(*(int *)arg, &cfg);
+    conn_handle(*(int *)arg, &cfg, 0);
     pthread_mutex_lock(&done_mu);
     server_done = 1;
     pthread_mutex_unlock(&done_mu);
@@ -111,6 +111,8 @@ static void reset_cfg(void)
     cfg.idle_timeout_ms = 2000;
     cfg.request_timeout_ms = 5000;
     cfg.write_timeout_ms = 2000;
+    cfg.keepalive_timeout_ms = 5000;
+    cfg.max_requests = 100;
 }
 
 /* ---------------- 본문 읽기 ---------------- */
@@ -169,10 +171,11 @@ static void test_body_split_across_reads(void)
 
 static void test_pipelined_bytes_not_in_body(void)
 {
-    /* Content-Length 뒤에 붙은 바이트는 다음 요청 몫 → 본문에 섞이면 안 된다 */
+    /* Content-Length 뒤에 붙은 바이트는 다음 요청 몫 → 본문에 섞이면 안 되고, 다음 요청으로 처리된다
+     * (여기서 다음 요청은 Host 가 없어서 400) */
     RUN("POST /echo HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nabcGET / HTTP/1.1\r\n\r\n");
     CHECK(strstr(got, "Content-Length: 3\r\n") != NULL);
-    CHECK_EQ_STR(body_of(got), "abc");
+    CHECK(strncmp(body_of(got), "abcHTTP/1.1 400 ", 16) == 0); /* 본문 abc 바로 뒤에 두 번째 응답 */
 }
 
 static void test_body_truncated(void)
@@ -202,6 +205,129 @@ static void test_get_echo_405(void)
     RUN("GET /echo HTTP/1.1\r\nHost: a\r\n\r\n");
     CHECK(STARTS_WITH(got, "HTTP/1.1 405 "));
     CHECK(strstr(got, "Allow: POST\r\n") != NULL);
+}
+
+/* ---------------- keep-alive / 파이프라이닝 ---------------- */
+
+/* got 안의 응답 개수 = 상태 라인 "HTTP/1.1 " 이 나온 횟수.
+ * (이 테스트들의 본문과 헤더에는 "HTTP/1.1 " 이 들어 있지 않다) */
+static int count_responses(void)
+{
+    int n = 0;
+    for (const char *p = got; (p = strstr(p, "HTTP/1.1 ")) != NULL; p++)
+        n++;
+    return n;
+}
+
+/* i 번째(0부터) 응답의 시작 위치 */
+static const char *nth_response(int i)
+{
+    const char *p = got;
+    for (int k = 0; p; k++) {
+        p = strstr(p, "HTTP/1.1 ");
+        if (!p)
+            return NULL;
+        if (k == i)
+            return p;
+        p++;
+    }
+    return NULL;
+}
+
+/* 응답 r 의 헤더 부분(빈 줄까지)에 h 가 있는가 */
+static int head_has(const char *r, const char *h)
+{
+    if (!r)
+        return 0;
+    const char *end = strstr(r, "\r\n\r\n");
+    const char *f = strstr(r, h);
+    return f && end && f < end;
+}
+
+#define GET_IDX "GET /index.html HTTP/1.1\r\nHost: a\r\n\r\n"
+
+static void test_pipelined_two_requests(void)
+{
+    /* 응답을 기다리지 않고 두 요청을 한 번에 보냄 → 두 응답이 순서대로 */
+    RUN(GET_IDX GET_IDX);
+    CHECK_EQ_INT(count_responses(), 2);
+    CHECK(head_has(nth_response(0), "Connection: keep-alive\r\n"));
+    CHECK(head_has(nth_response(0), "Keep-Alive: timeout=5, max=99\r\n"));
+    CHECK(head_has(nth_response(1), "Keep-Alive: timeout=5, max=98\r\n"));
+}
+
+static void test_pipelined_split(void)
+{
+    /* 두 번째 요청의 앞부분만 첫 요청과 같이 오고, 나머지는 나중에 */
+    pair p;
+    start(&p);
+    SEND(&p, GET_IDX "GET /index.html HT");
+    sleep_ms(100);
+    SEND(&p, "TP/1.1\r\nHost: a\r\n\r\n");
+    shutdown(p.sv[1], SHUT_WR);
+    finish(&p);
+    CHECK_EQ_INT(count_responses(), 2);
+    CHECK(strncmp(nth_response(1), "HTTP/1.1 200 ", 13) == 0);
+}
+
+static void test_connection_close_stops(void)
+{
+    /* 두 번째 요청이 Connection: close → 거기서 끝, 세 번째는 처리하지 않음 */
+    RUN(GET_IDX "GET /index.html HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n" GET_IDX);
+    CHECK_EQ_INT(count_responses(), 2);
+    CHECK(head_has(nth_response(1), "Connection: close\r\n"));
+    CHECK(!head_has(nth_response(1), "Keep-Alive:"));
+}
+
+static void test_max_requests(void)
+{
+    /* 연결당 최대 3개 → 5개를 보내도 3개만, 3번째 응답은 Connection: close */
+    cfg.max_requests = 3;
+    RUN(GET_IDX GET_IDX GET_IDX GET_IDX GET_IDX);
+    CHECK_EQ_INT(count_responses(), 3);
+    CHECK(head_has(nth_response(1), "Keep-Alive: timeout=5, max=1\r\n"));
+    CHECK(head_has(nth_response(2), "Connection: close\r\n"));
+    reset_cfg();
+}
+
+static void test_http10_rules(void)
+{
+    /* HTTP/1.0 은 기본이 "닫기" → 두 번째는 처리하지 않음 */
+    RUN("GET /index.html HTTP/1.0\r\n\r\nGET /index.html HTTP/1.0\r\n\r\n");
+    CHECK_EQ_INT(count_responses(), 1);
+    CHECK(head_has(nth_response(0), "Connection: close\r\n"));
+
+    /* HTTP/1.0 + Connection: keep-alive → 유지 */
+    RUN("GET /index.html HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"
+        "GET /index.html HTTP/1.0\r\nConnection: keep-alive\r\n\r\n");
+    CHECK_EQ_INT(count_responses(), 2);
+    CHECK(head_has(nth_response(0), "Connection: keep-alive\r\n"));
+}
+
+static void test_errors_and_keepalive(void)
+{
+    /* 404 는 요청 자체는 멀쩡 → 연결 유지, 다음 요청 처리 */
+    RUN("GET /nope HTTP/1.1\r\nHost: a\r\n\r\n" GET_IDX);
+    CHECK_EQ_INT(count_responses(), 2);
+    CHECK(strncmp(nth_response(0), "HTTP/1.1 404 ", 13) == 0);
+    CHECK(head_has(nth_response(0), "Connection: keep-alive\r\n"));
+
+    /* 400 (잘못된 %인코딩) → 닫기, 다음 요청은 처리하지 않음 */
+    RUN("GET /%zz HTTP/1.1\r\nHost: a\r\n\r\n" GET_IDX);
+    CHECK_EQ_INT(count_responses(), 1);
+    CHECK(head_has(nth_response(0), "Connection: close\r\n"));
+
+    /* 정적 파일에 본문 달린 GET → 본문을 안 읽었으므로 닫기 (남은 본문을 다음 요청으로 착각하면 안 됨) */
+    RUN("GET /index.html HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\nhello" GET_IDX);
+    CHECK_EQ_INT(count_responses(), 1);
+}
+
+static void test_post_then_get(void)
+{
+    /* 본문 있는 POST 다음 GET: 본문 경계를 정확히 지켜야 두 번째 요청이 온전하다 */
+    RUN("POST /echo HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc" GET_IDX);
+    CHECK_EQ_INT(count_responses(), 2);
+    CHECK(strncmp(nth_response(1), "HTTP/1.1 200 ", 13) == 0);
 }
 
 /* ---------------- Expect: 100-continue ---------------- */
@@ -395,6 +521,13 @@ int main(void)
     RUN_TEST(test_body_truncated);
     RUN_TEST(test_413_before_reading);
     RUN_TEST(test_get_echo_405);
+    RUN_TEST(test_pipelined_two_requests);
+    RUN_TEST(test_pipelined_split);
+    RUN_TEST(test_connection_close_stops);
+    RUN_TEST(test_max_requests);
+    RUN_TEST(test_http10_rules);
+    RUN_TEST(test_errors_and_keepalive);
+    RUN_TEST(test_post_then_get);
     RUN_TEST(test_expect_100_continue);
     RUN_TEST(test_expect_with_body_already_sent);
     RUN_TEST(test_expect_too_large);

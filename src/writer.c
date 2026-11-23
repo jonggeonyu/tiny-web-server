@@ -3,6 +3,7 @@
 #include "http_response.h"
 #include "netio.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -54,6 +55,12 @@ static size_t build_head(http_writer *w, int status, const char *content_type,
         http_head_add(&h, "Content-Type", content_type);
     http_head_add_num(&h, "Content-Length", content_length);
     http_head_add(&h, "Connection", w->keep_alive ? "keep-alive" : "close");
+    if (w->keep_alive && w->ka_timeout_s > 0) {
+        /* 참고용 안내: "쉬면 몇 초 뒤에 닫고, 이 연결로 몇 개 더 받을 수 있다" (HTTP/1.0 클라이언트가 주로 봄) */
+        char ka[64];
+        snprintf(ka, sizeof(ka), "timeout=%d, max=%d", w->ka_timeout_s, w->ka_max_left);
+        http_head_add(&h, "Keep-Alive", ka);
+    }
     for (int i = 0; i < w->extra_count; i++)      /* 3) 추가 헤더 */
         http_head_add(&h, w->extra_name[i], w->extra_value[i]);
     http_head_end(&h);                            /* 4) 빈 줄 */

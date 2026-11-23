@@ -2,6 +2,7 @@
 
 #include "conn.h"
 #include "fdutil.h"
+#include "keepalive.h"
 #include "linger.h"
 #include "netio.h"
 #include "threadpool.h"
@@ -68,26 +69,11 @@ int server_listen(int port)
     return fd;
 }
 
-/* 일꾼이 할 일: 연결 하나 처리 */
-static void worker_job(int fd, void *arg)
+/* 일꾼이 할 일: 연결 하나 처리.
+ * served = 그 연결에서 이미 처리한 요청 수 (새 연결 0, 보관 스레드에서 돌아온 연결은 그 값) */
+static void worker_job(int fd, int served, void *arg)
 {
-    conn_handle(fd, (const server_config *)arg);
-}
-
-/* 대기열이 가득 참 → 요청을 읽지도 않고 바로 503 을 보내고 닫는다.
- * accept 스레드에서 실행되므로 절대 오래 기다리면 안 된다:
- *   - 새로 연결된 소켓의 보내기 버퍼는 비어 있으므로 작은 응답(약 300바이트)은 바로 써진다
- *   - 그래도 만일을 위해 쓰기 시간 제한을 짧게(200ms) 건다 (진전 없이 200ms 면 포기)
- *   - 닫기는 linger 스레드에 넘긴다 (아직 안 읽은 요청 때문에 RST 가 나서 503 이 지워지는 것 방지) */
-static void reject_busy(int fd)
-{
-    net_set_nonblock(fd);
-    http_writer w;
-    writer_init(&w, fd);
-    w.write_timeout_ms = 200;
-    writer_add_header(&w, "Retry-After", "1"); /* "1초 뒤에 다시 시도하세요" */
-    writer_send_error(&w, 503);
-    linger_close(fd);
+    conn_handle(fd, (const server_config *)arg, served);
 }
 
 void server_run(int listen_fd, const server_config *cfg)
@@ -101,6 +87,9 @@ void server_run(int listen_fd, const server_config *cfg)
         linger_stop();
         return;
     }
+    /* 쉬는 keep-alive 연결 보관 스레드 (다음 요청이 오면 tp 에 다시 넣는다) */
+    if (keepalive_start(tp, cfg->keepalive_timeout_ms) < 0)
+        fprintf(stderr, "keep-alive 보관 스레드 시작 실패 → 응답 후 연결을 닫습니다\n");
 
     long long rejected = 0;
     for (;;) {
@@ -123,11 +112,13 @@ void server_run(int listen_fd, const server_config *cfg)
         }
 
         /* 일꾼에게 넘긴다. 일꾼이 모두 바쁘고 대기열도 가득 차면 503 */
-        if (threadpool_submit(tp, client_fd) < 0) {
+        /* 대기열이 가득 차면 요청을 읽지도 않고 바로 503. accept 스레드이므로 기다리지 않는다:
+         * 작은 응답은 비어 있는 보내기 버퍼에 바로 써지고, 닫기는 linger 스레드에 넘긴다 */
+        if (threadpool_submit(tp, client_fd, 0) < 0) {
             rejected++;
             printf("[main] 대기열 가득 참 → 503 (누적 %lld건)\n", rejected);
             fflush(stdout);
-            reject_busy(client_fd);
+            conn_reject_busy(client_fd);
         }
     }
     /* 종료 처리(threadpool_destroy, linger_stop)는 Step 10에서 */

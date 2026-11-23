@@ -42,13 +42,20 @@
 #define LINGER_MAX_BYTES (1024 * 1024)
 #define LINGER_MAX 256
 
+/* keep-alive: 응답 후 연결을 열어 두고 다음 요청을 기다린다.
+ * 쉬는 연결은 일꾼이 아니라 보관 스레드(keepalive.c)가 poll 로 지켜본다 */
+#define DEFAULT_KEEPALIVE_TIMEOUT_MS 5000  /* 쉬는 연결을 이 시간 동안 다음 요청이 없으면 닫음 */
+#define DEFAULT_MAX_REQUESTS 100           /* 연결 하나에서 처리할 최대 요청 수 (마지막 응답에 Connection: close) */
+#define KEEPALIVE_MAX 1024                 /* 보관 스레드가 동시에 맡는 쉬는 연결 최대 수 (넘으면 그냥 닫음) */
+
 /* CGI 자식이 exec 전에 한 번 더 닫는 fd 범위 [3, CHILD_CLOSE_FD_MAX).
  * fd 번호는 "비어 있는 가장 작은 번호"부터 쓰이므로, 서버가 동시에 여는 fd 개수가
  * 이보다 작으면 모든 fd 번호가 이 범위 안에 있다 → 비리눅스에서도 누출 없음.
- *   표준입출력 3 + 듣기 1 + linger 깨우기 파이프 2 + 대기열 + 일꾼×(클라이언트 1 + 파이프 4)
- *   + linger + accept 직후 손에 든 1 */
+ *   표준입출력 3 + 듣기 1 + 깨우기 파이프 2개(linger, keep-alive) 4 + 대기열 + 일꾼×(클라이언트 1 + 파이프 4)
+ *   + linger + keep-alive 보관 + accept 직후 손에 든 1 */
 #define CHILD_CLOSE_FD_MAX 4096
-_Static_assert(3 + 1 + 2 + MAX_QUEUE + MAX_THREADS * 5 + LINGER_MAX + 1 < CHILD_CLOSE_FD_MAX,
+_Static_assert(3 + 1 + 4 + MAX_QUEUE + MAX_THREADS * 5 + LINGER_MAX + KEEPALIVE_MAX + 1 <
+                   CHILD_CLOSE_FD_MAX,
                "동시에 열릴 수 있는 fd 수가 CHILD_CLOSE_FD_MAX 를 넘음");
 
 /* 실행 시 정해지는 설정 (명령줄 인자로 채운다).
@@ -61,6 +68,8 @@ typedef struct {
     int request_timeout_ms;
     int write_timeout_ms;
     int cgi_timeout_ms;
+    int keepalive_timeout_ms; /* 쉬는 keep-alive 연결을 기다리는 최대 시간 */
+    int max_requests;         /* 연결 하나에서 처리할 최대 요청 수 */
     int threads;              /* 일꾼 스레드 수 */
     int queue_size;           /* 대기열 칸 수 (가득 차면 503) */
 } server_config;

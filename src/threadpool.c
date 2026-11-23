@@ -13,6 +13,11 @@ typedef struct {
     int id;
 } worker_start;
 
+typedef struct {
+    int fd;
+    int tag;
+} tp_item;
+
 struct threadpool {
     /* mutex: 아래 대기열 변수들을 "한 번에 한 스레드만" 만지게 하는 자물쇠 */
     pthread_mutex_t lock;
@@ -20,7 +25,7 @@ struct threadpool {
     pthread_cond_t not_empty;
 
     /* 원형 대기열: queue[head] 가 다음에 꺼낼 일. 끝에 닿으면 0 번 칸으로 돌아간다 */
-    int *queue;
+    tp_item *queue;
     int cap;
     int head;
     int count;
@@ -61,26 +66,26 @@ static void *worker_main(void *p)
             break;
         }
 
-        int fd = tp->queue[tp->head];
+        tp_item item = tp->queue[tp->head];
         tp->head = (tp->head + 1) % tp->cap;
         tp->count--;
         pthread_mutex_unlock(&tp->lock);
 
         /* 실제 일은 자물쇠를 푼 뒤에 한다. 쥔 채로 하면 다른 일꾼이 대기열을 못 만져서
          * 사실상 한 번에 하나씩만 처리하게 된다 */
-        tp->fn(fd, tp->arg);
+        tp->fn(item.fd, item.tag, tp->arg);
     }
     return NULL;
 }
 
-int threadpool_submit(threadpool *tp, int fd)
+int threadpool_submit(threadpool *tp, int fd, int tag)
 {
     pthread_mutex_lock(&tp->lock);
     if (tp->shutdown || tp->count == tp->cap) {
         pthread_mutex_unlock(&tp->lock);
         return -1; /* 가득 참: 기다리지 않는다 → 호출자가 503 */
     }
-    tp->queue[(tp->head + tp->count) % tp->cap] = fd;
+    tp->queue[(tp->head + tp->count) % tp->cap] = (tp_item){fd, tag};
     tp->count++;
     /* 잠든 일꾼 "하나"를 깨운다 (일이 하나 늘었으니 하나면 충분) */
     pthread_cond_signal(&tp->not_empty);
@@ -121,7 +126,7 @@ threadpool *threadpool_create(int nthreads, int queue_cap, tp_job_fn fn, void *a
     threadpool *tp = calloc(1, sizeof(*tp));
     if (!tp)
         return NULL;
-    tp->queue = calloc((size_t)queue_cap, sizeof(int));
+    tp->queue = calloc((size_t)queue_cap, sizeof(tp_item));
     tp->threads = calloc((size_t)nthreads, sizeof(pthread_t));
     tp->starts = calloc((size_t)nthreads, sizeof(worker_start));
     pthread_mutex_init(&tp->lock, NULL);

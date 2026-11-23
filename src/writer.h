@@ -25,6 +25,8 @@ typedef struct {
     int server_keep_alive;  /* 서버가 연결 유지를 지원하는가 (Step 9 전까지 0) */
 
     int keep_alive;         /* 판단 결과 = Connection 헤더에 쓴 값 (1 = keep-alive, 0 = close) */
+    int ka_timeout_s;       /* > 0 이면 유지할 때 "Keep-Alive: timeout=초, max=남은 요청 수" 헤더를 붙임 */
+    int ka_max_left;
 
     /* 추가 헤더 (예: 405 의 Allow). 문자열은 send_head 때까지 살아 있어야 한다 */
     const char *extra_name[WRITER_MAX_EXTRA];

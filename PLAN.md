@@ -33,6 +33,7 @@ tiny-web-server/
 │   ├── server.c/.h       # socket → bind → listen → accept 루프
 │   ├── threadpool.c/.h   # 작업 큐 + pthread 워커 (가득 차면 submit 실패 → 503)
 │   ├── linger.c/.h       # 부드럽게 닫기 전담 스레드 (일꾼을 붙잡지 않게)
+│   ├── keepalive.c/.h    # 쉬는 keep-alive 연결 보관 스레드 (데이터가 오면 대기열로)
 │   ├── fdutil.c/.h       # FD_CLOEXEC 가 붙은 채로 accept/pipe (리눅스: accept4/pipe2)
 │   ├── conn.c/.h         # 연결 1개 처리: 읽기 버퍼, keep-alive 반복, 타임아웃
 │   ├── netio.c/.h        # read/write 래퍼 (EINTR 재시도, 부분 쓰기 처리, 부드럽게 닫기)
@@ -58,7 +59,7 @@ tiny-web-server/
 │   ├── test_mime.c
 │   ├── test_router.c
 │   ├── test_static.c     # 임시 디렉토리 + 심볼릭 링크로 정적 파일 처리기 검사
-│   ├── test_conn.c       # socketpair + 스레드로 연결 전체 흐름 검사 (본문, 100-continue, 타임아웃)
+│   ├── test_conn.c       # socketpair + 스레드로 연결 전체 흐름 검사 (본문, 100-continue, 타임아웃, keep-alive)
 │   └── e2e.sh            # curl 기반 기능 테스트 스크립트 (서버 띄워서 확인)
 ├── www/                  # 테스트용 정적 파일 (index.html, style.css, app.js, img.png, img.jpg, secret.txt(권한 000))
 ├── cgi-bin/              # 테스트용 CGI (hello.sh, echo_post.sh, env.sh, slow.sh, adder.c)
@@ -235,7 +236,8 @@ main → server → threadpool → conn → router → handler_static / handler_
   - 메인 스레드: `accept()` → fd를 큐에 넣음. 워커: 큐에서 fd를 꺼내 `conn` 처리.
   - 큐가 가득 차면 503(`Retry-After: 1`) 응답 후 close (과부하 시 무한정 쌓지 않음).
   - 공유 자원(로그 등)은 뮤텍스 보호. `strerror` 대신 `strerror_r` 등 스레드 안전 함수만 사용.
-  - 기본값: 일꾼 = CPU 수 × 2 (4~64), 대기열 = 일꾼 × 4. `-t`, `-q` 로 변경.
+  - 일꾼 수: `-t` 를 안 주면 CPU 수 × 2 를 4~64 로 맞춘 값 (이 PC: 32). `-t` 로 직접 지정하면 1~256 (`MAX_THREADS`).
+  - 대기열: `-q` 를 안 주면 일꾼 × 4 (최대 1024 로 자름). `-q` 로 직접 지정하면 1~1024 (`MAX_QUEUE`).
   - 부드럽게 닫기는 전용 linger 스레드가 `poll` 로 모아서 처리 (일꾼이 최대 2초씩 묶이지 않게).
   - 클라이언트 소켓은 논블로킹 + `poll` 로 쓰기 시간 제한(진전 없이 10초면 포기).
 - **확인**
@@ -250,14 +252,17 @@ main → server → threadpool → conn → router → handler_static / handler_
 ### Step 9. Keep-Alive
 - 한 연결에서 요청을 반복 처리. 규칙:
   - HTTP/1.1 기본 유지, `Connection: close`면 종료. HTTP/1.0은 `Connection: keep-alive`일 때만 유지.
-  - 앞 요청 뒤에 이미 읽힌 바이트(파이프라이닝)는 버리지 않고 다음 요청 파싱에 사용.
-  - 유휴 타임아웃(예: 5초, `SO_RCVTIMEO`)과 연결당 최대 요청 수(예: 100) → 워커가 영원히 묶이지 않게.
+  - 요청 해석 실패, 본문을 다 읽지 않음, 400/408/413/414/417/431/5xx → 닫기 (요청 경계를 믿을 수 없음).
+  - 앞 요청 뒤에 이미 읽힌 바이트(파이프라이닝)는 버리지 않고 같은 일꾼이 바로 다음 요청으로 처리.
+  - 다음 요청이 아직 안 왔으면 일꾼은 기다리지 않고 **keep-alive 보관 스레드**(keepalive.c)에 맡긴다.
+    보관 스레드는 poll 로 쉬는 연결(최대 1024개)을 지켜보다가 데이터가 오면 대기열에 다시 넣는다.
+  - 쉬는 연결 유휴 5초, 연결당 최대 100요청 (마지막 응답에 `Connection: close`). `Keep-Alive: timeout=5, max=N` 헤더.
+  - `TCP_NODELAY`: 응답 머리와 본문을 나눠 보낼 때 Nagle + 지연 ACK 로 요청마다 ~40ms 지연되는 것 방지.
 - **확인**
   ```bash
-  curl -v http://localhost:8080/ http://localhost:8080/style.css 2>&1 | grep -i "re-us"   # Re-using existing connection
+  curl -v http://localhost:8080/ http://localhost:8080/style.css 2>&1 | grep -iE "re-?using"   # 연결 재사용
   printf 'GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /style.css HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' | nc localhost 8080   # 응답 2개 연속
-  ab -k -n 5000 -c 50 http://localhost:8080/index.html   # Keep-Alive requests 수 확인
-  nc localhost 8080   # 아무것도 안 보내고 5초 뒤 서버가 끊는지
+  ab -k -n 20000 -c 100 http://127.0.0.1:8080/index.html   # Keep-Alive requests 수, 처리량 비교
   ```
 
 ### Step 10. 안정화

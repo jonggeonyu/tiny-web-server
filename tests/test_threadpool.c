@@ -34,8 +34,9 @@ static void reset(void)
 }
 
 /* 일: arg 만큼(ms) 자면서 기록 */
-static void job(int fd, void *arg)
+static void job(int fd, int tag, void *arg)
 {
+    (void)tag;
     long ms = (long)(intptr_t)arg;
     int wid = threadpool_worker_id();
 
@@ -71,7 +72,7 @@ static void test_all_jobs_once(void)
     threadpool *tp = threadpool_create(8, 1000, job, (void *)(intptr_t)0);
     CHECK(tp != NULL);
     for (int i = 0; i < 1000; i++)
-        CHECK_EQ_INT(threadpool_submit(tp, i), 0);
+        CHECK_EQ_INT(threadpool_submit(tp, i, 0), 0);
     threadpool_destroy(tp); /* 남은 일 모두 처리 후 종료 */
 
     CHECK_EQ_INT(done_count, 1000);
@@ -91,7 +92,7 @@ static void test_runs_in_parallel(void)
     threadpool *tp = threadpool_create(8, 16, job, (void *)(intptr_t)100);
     long long t0 = net_now_ms();
     for (int i = 0; i < 8; i++)
-        threadpool_submit(tp, i);
+        threadpool_submit(tp, i, 0);
     while (get_done() < 8)
         sleep_ms(5);
     long long dt = net_now_ms() - t0;
@@ -105,12 +106,12 @@ static void test_queue_full_rejects(void)
     /* 일꾼 1개가 200ms 짜리 일을 하는 동안 대기열 2칸 → 3번째부터는 거절 */
     reset();
     threadpool *tp = threadpool_create(1, 2, job, (void *)(intptr_t)200);
-    CHECK_EQ_INT(threadpool_submit(tp, 1), 0);
+    CHECK_EQ_INT(threadpool_submit(tp, 1, 0), 0);
     sleep_ms(50); /* 일꾼이 1번을 가져가 처리 중 → 대기열은 빈 상태 */
-    CHECK_EQ_INT(threadpool_submit(tp, 2), 0);
-    CHECK_EQ_INT(threadpool_submit(tp, 3), 0);
-    CHECK_EQ_INT(threadpool_submit(tp, 4), -1); /* 가득 참: 기다리지 않고 바로 실패 */
-    CHECK_EQ_INT(threadpool_submit(tp, 5), -1);
+    CHECK_EQ_INT(threadpool_submit(tp, 2, 0), 0);
+    CHECK_EQ_INT(threadpool_submit(tp, 3, 0), 0);
+    CHECK_EQ_INT(threadpool_submit(tp, 4, 0), -1); /* 가득 참: 기다리지 않고 바로 실패 */
+    CHECK_EQ_INT(threadpool_submit(tp, 5, 0), -1);
     threadpool_destroy(tp);
     CHECK_EQ_INT(done_count, 3);
     CHECK_EQ_INT(seen[4], 0);
