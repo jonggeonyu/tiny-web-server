@@ -21,6 +21,10 @@ ssize_t net_read(int fd, void *buf, size_t len);
  * 시간 안에 아무것도 안 오면 -1 + errno = ETIMEDOUT */
 ssize_t net_read_timeout(int fd, void *buf, size_t len, int timeout_ms);
 
+/* errno 값 → 설명 문자열 (스레드 안전). strerror 는 결과를 공유 버퍼에 쓸 수 있어서
+ * 여러 스레드가 동시에 부르면 메시지가 섞일 수 있다 → 호출자 버퍼에 쓰는 strerror_r 사용 */
+const char *net_errstr(int err, char *buf, size_t cap);
+
 /* 시계를 바꿔도 영향 없는 "흐른 시간" (밀리초). 시간 제한 계산용 */
 long long net_now_ms(void);
 
@@ -34,6 +38,11 @@ int net_set_cloexec(int fd);
 
 /* fd 를 논블로킹으로: 읽을/쓸 게 없으면 기다리지 않고 바로 -1 + EAGAIN 을 돌려준다. 반환: 0 / -1 */
 int net_set_nonblock(int fd);
+
+/* net_write_all 과 같지만 "진전 없는 시간"에 제한을 둔다. fd 는 논블로킹이어야 한다.
+ * 쓸 자리가 없으면(EAGAIN) poll 로 최대 idle_ms 기다리고, 그동안 1바이트도 못 쓰면 -1 + ETIMEDOUT.
+ * (조금이라도 써지면 시계는 다시 0부터) → 받아 가지 않는 클라이언트 때문에 영원히 멈추지 않는다 */
+int net_write_all_timeout(int fd, const void *buf, size_t len, int idle_ms);
 
 /* "부드럽게 닫기" (lingering close).
  * 클라이언트가 보낸 데이터를 다 읽지 않은 채 close() 하면, 운영체제가 RST(강제 종료)를 보내서

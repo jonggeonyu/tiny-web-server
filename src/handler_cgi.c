@@ -1,6 +1,7 @@
 #include "handler_cgi.h"
 
 #include "cgi.h"
+#include "fdutil.h"
 #include "netio.h"
 #include "path.h"
 
@@ -19,8 +20,8 @@
 #define CGI_PREFIX "/cgi-bin/"
 #define CGI_PREFIX_LEN 9
 
-/* 자식에서 한 번 더 닫아 볼 fd 범위의 상한 (주 방어는 FD_CLOEXEC, 이건 보조) */
-#define CHILD_CLOSE_FD_MAX 4096
+/* 자식에서 한 번 더 닫아 볼 fd 범위의 상한 CHILD_CLOSE_FD_MAX 는 config.h 에 있다
+ * (서버가 동시에 여는 fd 수가 그보다 작도록 함께 관리하기 위해) */
 
 typedef enum {
     RUN_OK,
@@ -153,17 +154,14 @@ static run_result run_cgi(const char *script, const char *dir, char **envp,
      *   to_cgi   : 서버 →(본문)→ CGI 의 표준 입력
      *   from_cgi : CGI 의 표준 출력 →(응답)→ 서버 */
     int to_cgi[2], from_cgi[2];
-    if (pipe(to_cgi) < 0)
+    /* 만들면서 바로 FD_CLOEXEC: 다른 일꾼이 지금 이 순간 fork 해도 이 파이프는 새지 않는다 */
+    if (fd_pipe_cloexec(to_cgi) < 0)
         return RUN_SPAWN_FAIL;
-    if (pipe(from_cgi) < 0) {
+    if (fd_pipe_cloexec(from_cgi) < 0) {
         close(to_cgi[0]);
         close(to_cgi[1]);
         return RUN_SPAWN_FAIL;
     }
-    net_set_cloexec(to_cgi[0]);
-    net_set_cloexec(to_cgi[1]);
-    net_set_cloexec(from_cgi[0]);
-    net_set_cloexec(from_cgi[1]);
 
     char *argv[] = {(char *)script, NULL};
 

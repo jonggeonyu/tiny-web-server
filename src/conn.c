@@ -3,9 +3,11 @@
 #include "config.h"
 #include "http_parser.h"
 #include "http_response.h"
+#include "linger.h"
 #include "netio.h"
 #include "path.h"
 #include "router.h"
+#include "threadpool.h"
 #include "writer.h"
 
 #include <arpa/inet.h>
@@ -18,9 +20,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-/* 에러 뒤 부드럽게 닫기: 최대 2초, 최대 1MB 까지 남은 입력을 읽어 버린다 */
-#define LINGER_TIMEOUT_MS 2000
-#define LINGER_MAX_BYTES (1024 * 1024)
+/* 로그 줄 앞에 붙이는 일꾼 번호. 여러 일꾼의 로그가 섞여도 누구 것인지 알 수 있게 */
+#define WTAG "[w%02d] "
 
 /* read_and_parse / read_body 의 특별한 결과 */
 #define CONN_CLOSED  (-1)  /* 클라이언트가 끊음 또는 read 에러 → 응답 없이 닫기 */
@@ -60,11 +61,13 @@ static int read_and_parse(int fd, char *buf, size_t cap, size_t *used, http_requ
             return CONN_TIMEOUT;
         if (n == 0) {
             if (*used > 0)
-                fprintf(stderr, "  요청 도중 클라이언트가 연결을 닫음\n");
+                fprintf(stderr, WTAG "요청 도중 클라이언트가 연결을 닫음\n", threadpool_worker_id());
             return CONN_CLOSED;
         }
         if (n < 0) {
-            fprintf(stderr, "  read 실패: %s\n", strerror(errno));
+            char eb[128];
+            fprintf(stderr, WTAG "read 실패: %s\n", threadpool_worker_id(),
+                    net_errstr(errno, eb, sizeof(eb)));
             return CONN_CLOSED;
         }
         *used += (size_t)n;
@@ -128,7 +131,8 @@ static int read_body(int fd, const http_request *req, const char *buf, size_t us
             return CONN_TIMEOUT;
         }
         if (n == 0) {
-            fprintf(stderr, "  본문이 %zu/%lld 바이트만 오고 끊김\n", got, cl);
+            fprintf(stderr, WTAG "본문이 %zu/%lld 바이트만 오고 끊김\n", threadpool_worker_id(), got,
+                    cl);
             free(data);
             return 400;
         }
@@ -149,7 +153,8 @@ static int read_body(int fd, const http_request *req, const char *buf, size_t us
  * *close_now : 부드럽게 닫기 없이 바로 닫아야 하는가 (시간 초과, 끊김) */
 static void handle_request(int fd, const http_request *req, const char *buf, size_t used,
                            http_writer *w, const server_config *cfg, long long deadline,
-                           int *body_done, int *close_now)
+                           const char *remote_addr, int remote_port, int *body_done,
+                           int *close_now)
 {
     *body_done = (req->content_length <= 0);
 
@@ -192,21 +197,6 @@ static void handle_request(int fd, const http_request *req, const char *buf, siz
     }
 
     /* 처리기에 넘길 재료 묶음. 클라이언트 주소는 CGI 의 REMOTE_ADDR 등에 쓰인다 */
-    char remote_addr[INET6_ADDRSTRLEN] = "unknown";
-    int remote_port = 0;
-    struct sockaddr_storage peer;
-    socklen_t peer_len = sizeof(peer);
-    if (getpeername(fd, (struct sockaddr *)&peer, &peer_len) == 0) {
-        if (peer.ss_family == AF_INET) {
-            struct sockaddr_in *a = (struct sockaddr_in *)&peer;
-            inet_ntop(AF_INET, &a->sin_addr, remote_addr, sizeof(remote_addr));
-            remote_port = ntohs(a->sin_port);
-        } else if (peer.ss_family == AF_INET6) {
-            struct sockaddr_in6 *a = (struct sockaddr_in6 *)&peer;
-            inet_ntop(AF_INET6, &a->sin6_addr, remote_addr, sizeof(remote_addr));
-            remote_port = ntohs(a->sin6_port);
-        }
-    }
     request_ctx ctx = {
         .req = req,
         .path = path,
@@ -220,21 +210,51 @@ static void handle_request(int fd, const http_request *req, const char *buf, siz
     free(body.data);
 }
 
+/* 클라이언트 주소 "127.0.0.1" 과 포트. 소켓이 TCP 가 아니면(테스트의 socketpair) "unknown" */
+static void peer_name(int fd, char *addr, size_t cap, int *port)
+{
+    snprintf(addr, cap, "unknown");
+    *port = 0;
+    struct sockaddr_storage peer;
+    socklen_t peer_len = sizeof(peer);
+    if (getpeername(fd, (struct sockaddr *)&peer, &peer_len) != 0)
+        return;
+    if (peer.ss_family == AF_INET) {
+        struct sockaddr_in *a = (struct sockaddr_in *)&peer;
+        inet_ntop(AF_INET, &a->sin_addr, addr, (socklen_t)cap);
+        *port = ntohs(a->sin_port);
+    } else if (peer.ss_family == AF_INET6) {
+        struct sockaddr_in6 *a = (struct sockaddr_in6 *)&peer;
+        inet_ntop(AF_INET6, &a->sin6_addr, addr, (socklen_t)cap);
+        *port = ntohs(a->sin6_port);
+    }
+}
+
 void conn_handle(int client_fd, const server_config *cfg)
 {
     char buf[HTTP_HEAD_MAX];
     size_t used = 0;
+    int wid = threadpool_worker_id();
+
+    char remote_addr[INET6_ADDRSTRLEN];
+    int remote_port;
+    peer_name(client_fd, remote_addr, sizeof(remote_addr), &remote_port);
+
+    /* 논블로킹: 읽기는 늘 poll 로 기다린 뒤 하고, 쓰기는 writer 가 "진전 없는 시간"을 재며 기다린다.
+     * (블로킹 write 는 받아 가지 않는 클라이언트 앞에서 끝없이 멈춰 일꾼을 묶는다) */
+    net_set_nonblock(client_fd);
 
     /* http_request 는 버퍼를 품고 있어 크기가 크다(약 13KB) → 스택 대신 힙에 할당 */
     http_request *req = malloc(sizeof(*req));
     if (!req) {
-        fprintf(stderr, "  메모리 부족\n");
+        fprintf(stderr, WTAG "메모리 부족\n", wid);
         close(client_fd);
         return;
     }
 
     http_writer w;
     writer_init(&w, client_fd);
+    w.write_timeout_ms = cfg->write_timeout_ms;
 
     /* 요청 하나(헤더 + 본문)를 다 받아야 하는 마감 시각 */
     long long deadline = net_now_ms() + cfg->request_timeout_ms;
@@ -256,36 +276,42 @@ void conn_handle(int client_fd, const server_config *cfg)
          * 보내다 만 요청에만 408 을 알려준다 */
         if (used > 0) {
             writer_send_error(&w, 408);
-            printf("  → 408 Request Timeout (헤더가 %zu바이트에서 멈춤)\n", used);
+            printf(WTAG "%s:%d → 408 Request Timeout (헤더가 %zu바이트에서 멈춤)\n", wid,
+                   remote_addr, remote_port, used);
         }
         close_now = 1;
     } else if (r == HTTP_PARSE_ERROR) {
         /* 요청을 해석하지 못함 → 에러 응답 (parsed_ok=0 이므로 writer 가 Connection: close 로 보냄) */
         writer_send_error(&w, req->error_status);
-        printf("  → %d %s (%s)\n", w.status, http_status_text(w.status), req->error_reason);
+        printf(WTAG "%s:%d → %d %s (%s)\n", wid, remote_addr, remote_port, w.status,
+               http_status_text(w.status), req->error_reason);
     } else {
         w.head_only = (strcmp(req->method, "HEAD") == 0);
-        handle_request(client_fd, req, buf, used, &w, cfg, deadline, &body_done, &close_now);
+        handle_request(client_fd, req, buf, used, &w, cfg, deadline, remote_addr, remote_port,
+                       &body_done, &close_now);
 
-        printf("  \"%s %s HTTP/%d.%d\" → %d %s (본문 %lld바이트%s)%s%s\n", req->method,
-               req->target, req->version_major, req->version_minor, w.status,
+        printf(WTAG "%s:%d \"%s %s HTTP/%d.%d\" → %d %s (본문 %lld바이트%s)%s%s\n", wid,
+               remote_addr, remote_port, req->method, req->target, req->version_major,
+               req->version_minor, w.status,
                http_status_text(w.status), w.body_len, w.head_only ? ", HEAD 라서 생략" : "",
                w.note ? " - " : "", w.note ? w.note : "");
     }
     fflush(stdout);
 
     if (w.failed)
-        fprintf(stderr, "  응답이 중간에 끊김 (클라이언트 종료 또는 파일 읽기 실패) → 연결 닫음\n");
+        fprintf(stderr, WTAG "응답이 중간에 끊김 (클라이언트가 안 받음/끊음, 파일 읽기 실패) → 연결 닫음\n",
+                wid);
 
     free(req);
 
     /* 닫는 방법 고르기:
      *  - 시간 초과/끊김/전송 실패 → 바로 닫기 (느린 클라이언트를 더 기다려 줄 이유가 없음)
      *  - 요청 끝을 모르거나(파싱 에러) 본문을 다 읽지 않았으면 → 부드럽게 닫기
+     *    (전용 linger 스레드에 넘기고 일꾼은 바로 다음 일로 → 일꾼이 최대 2초씩 묶이지 않는다)
      *  - 그 밖 → 그냥 닫기 */
     int maybe_unread = (r == HTTP_PARSE_ERROR) || (parsed_ok && !body_done);
     if (close_now || w.failed || !maybe_unread)
         close(client_fd);
     else
-        net_lingering_close(client_fd, LINGER_TIMEOUT_MS, LINGER_MAX_BYTES);
+        linger_close(client_fd);
 }

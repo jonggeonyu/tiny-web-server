@@ -17,6 +17,7 @@
 typedef struct {
     int fd;
     int head_only;          /* 1 이면 본문을 보내지 않음 (HEAD 요청) */
+    int write_timeout_ms;   /* > 0 이면 진전 없이 이 시간이 지나면 전송 포기 (fd 는 논블로킹이어야 함) */
 
     /* 연결 유지 판단 재료 (conn 이 채운다). 실제 판단은 응답 상태가 정해지는 send 시점에 한다 */
     int parsed_ok;          /* 요청을 끝까지 제대로 해석했는가 */

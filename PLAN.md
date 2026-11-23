@@ -31,7 +31,9 @@ tiny-web-server/
 │   │
 │   │   ── 네트워크 계층 (소켓을 아는 코드) ──
 │   ├── server.c/.h       # socket → bind → listen → accept 루프
-│   ├── threadpool.c/.h   # 작업 큐 + pthread 워커
+│   ├── threadpool.c/.h   # 작업 큐 + pthread 워커 (가득 차면 submit 실패 → 503)
+│   ├── linger.c/.h       # 부드럽게 닫기 전담 스레드 (일꾼을 붙잡지 않게)
+│   ├── fdutil.c/.h       # FD_CLOEXEC 가 붙은 채로 accept/pipe (리눅스: accept4/pipe2)
 │   ├── conn.c/.h         # 연결 1개 처리: 읽기 버퍼, keep-alive 반복, 타임아웃
 │   ├── netio.c/.h        # read/write 래퍼 (EINTR 재시도, 부분 쓰기 처리, 부드럽게 닫기)
 │   ├── writer.c/.h       # 응답 전송 도구: handler 는 소켓 대신 이걸로만 보냄 (HEAD 본문 생략, 연결 유지 판단)
@@ -231,11 +233,15 @@ main → server → threadpool → conn → router → handler_static / handler_
 ### Step 8. 동시 처리 (스레드 풀)
 - `threadpool`: 고정 개수 워커 + 크기 제한 있는 원형 큐 + `pthread_mutex` + `pthread_cond`.
   - 메인 스레드: `accept()` → fd를 큐에 넣음. 워커: 큐에서 fd를 꺼내 `conn` 처리.
-  - 큐가 가득 차면 503 응답 후 close (과부하 시 무한정 쌓지 않음).
-  - 공유 자원(로그 등)은 뮤텍스 보호. `strtok` 대신 `strtok_r` 등 스레드 안전 함수만 사용.
+  - 큐가 가득 차면 503(`Retry-After: 1`) 응답 후 close (과부하 시 무한정 쌓지 않음).
+  - 공유 자원(로그 등)은 뮤텍스 보호. `strerror` 대신 `strerror_r` 등 스레드 안전 함수만 사용.
+  - 기본값: 일꾼 = CPU 수 × 2 (4~64), 대기열 = 일꾼 × 4. `-t`, `-q` 로 변경.
+  - 부드럽게 닫기는 전용 linger 스레드가 `poll` 로 모아서 처리 (일꾼이 최대 2초씩 묶이지 않게).
+  - 클라이언트 소켓은 논블로킹 + `poll` 로 쓰기 시간 제한(진전 없이 10초면 포기).
 - **확인**
   ```bash
-  # 2초 걸리는 CGI를 10개 동시에 → 직렬이면 20초, 풀(8개)이면 약 4초
+  # 2초 걸리는 CGI를 10개 동시에 → 직렬이면 20초, 일꾼 10개 이상이면 약 2초
+  # (서버는 다른 터미널에서 띄울 것: 같은 셸의 백그라운드면 wait 가 서버까지 기다린다)
   time (for i in $(seq 10); do curl -s http://localhost:8080/cgi-bin/slow.sh > /dev/null & done; wait)
   ab -n 2000 -c 50 http://localhost:8080/index.html     # Failed requests: 0
   ```

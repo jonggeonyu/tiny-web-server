@@ -9,6 +9,14 @@
 #define SERVER_NAME "tiny-web-server"
 #define HEAD_BUF_SIZE 8192 /* CGI 가 헤더를 여러 개 낼 수 있으므로 넉넉히 */
 
+/* 모든 전송은 여기를 거친다: 쓰기 시간 제한이 설정돼 있으면 그것을 적용 */
+static int send_bytes(http_writer *w, const void *buf, size_t len)
+{
+    if (w->write_timeout_ms > 0)
+        return net_write_all_timeout(w->fd, buf, len, w->write_timeout_ms);
+    return net_write_all(w->fd, buf, len);
+}
+
 void writer_init(http_writer *w, int fd)
 {
     memset(w, 0, sizeof(*w));
@@ -58,7 +66,7 @@ int writer_send_continue(http_writer *w)
     if (w->status != 0 || w->failed)
         return -1; /* 최종 응답을 이미 보냈다면 의미 없음 */
     static const char msg[] = "HTTP/1.1 100 Continue\r\n\r\n";
-    if (net_write_all(w->fd, msg, sizeof(msg) - 1) < 0) {
+    if (send_bytes(w, msg, sizeof(msg) - 1) < 0) {
         w->failed = 1;
         return -1;
     }
@@ -77,7 +85,7 @@ int writer_send_head(http_writer *w, int status, const char *content_type,
         return -1; /* 조립 실패: 아직 아무것도 안 보냈으므로 failed 가 아니다 → 다른 응답 가능 */
     w->status = status;
     w->body_len = content_length;
-    if (net_write_all(w->fd, buf, len) < 0) {
+    if (send_bytes(w, buf, len) < 0) {
         w->failed = 1;
         return -1;
     }
@@ -90,7 +98,7 @@ int writer_send_body(http_writer *w, const void *data, size_t len)
         return -1; /* 머리를 먼저 보내야 한다 */
     if (w->head_only || len == 0)
         return 0;  /* HEAD 요청: 본문은 보내지 않는다 */
-    if (net_write_all(w->fd, data, len) < 0) {
+    if (send_bytes(w, data, len) < 0) {
         w->failed = 1;
         return -1;
     }
@@ -115,14 +123,14 @@ int writer_send_all(http_writer *w, int status, const char *content_type, const 
     size_t body_now = w->head_only ? 0 : len;
     if (head_len + body_now <= sizeof(buf)) {
         memcpy(buf + head_len, body, body_now);
-        if (net_write_all(w->fd, buf, head_len + body_now) < 0) {
+        if (send_bytes(w, buf, head_len + body_now) < 0) {
             w->failed = 1;
             return -1;
         }
         return 0;
     }
     /* 본문이 크면 따로 보낸다 */
-    if (net_write_all(w->fd, buf, head_len) < 0) {
+    if (send_bytes(w, buf, head_len) < 0) {
         w->failed = 1;
         return -1;
     }

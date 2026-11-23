@@ -35,10 +35,27 @@ static void sleep_ms(long ms)
     nanosleep(&ts, NULL);
 }
 
+static pthread_mutex_t done_mu = PTHREAD_MUTEX_INITIALIZER;
+static int server_done; /* conn_handle 이 끝났는가 (쓰기 시간 제한 테스트용) */
+
 static void *server_thread(void *arg)
 {
+    pthread_mutex_lock(&done_mu);
+    server_done = 0;
+    pthread_mutex_unlock(&done_mu);
     conn_handle(*(int *)arg, &cfg);
+    pthread_mutex_lock(&done_mu);
+    server_done = 1;
+    pthread_mutex_unlock(&done_mu);
     return NULL;
+}
+
+static int is_server_done(void)
+{
+    pthread_mutex_lock(&done_mu);
+    int d = server_done;
+    pthread_mutex_unlock(&done_mu);
+    return d;
 }
 
 typedef struct {
@@ -93,6 +110,7 @@ static void reset_cfg(void)
 {
     cfg.idle_timeout_ms = 2000;
     cfg.request_timeout_ms = 5000;
+    cfg.write_timeout_ms = 2000;
 }
 
 /* ---------------- 본문 읽기 ---------------- */
@@ -304,6 +322,31 @@ static void *trickle_thread(void *arg)
     return NULL;
 }
 
+static void test_write_timeout_slow_reader(void)
+{
+    /* 1MB 를 echo 로 돌려받는데 클라이언트가 응답을 전혀 읽지 않음.
+     * 소켓 버퍼가 차서 서버의 write 가 멈춘다 → 쓰기 시간 제한(300ms) 뒤 포기하고 닫아야 한다.
+     * 제한이 없다면 conn_handle 이 영원히 끝나지 않는다 (= 일꾼 하나가 영원히 묶임) */
+    cfg.write_timeout_ms = 300;
+    static char req[HTTP_BODY_MAX + 256];
+    size_t body_len = HTTP_BODY_MAX;
+    int h = snprintf(req, sizeof(req),
+                     "POST /echo HTTP/1.1\r\nHost: a\r\nContent-Length: %zu\r\n\r\n", body_len);
+    memset(req + h, 'x', body_len);
+
+    pair p;
+    start(&p);
+    send_str(&p, req, (size_t)h + body_len);
+    long long t0 = net_now_ms();
+    while (!is_server_done() && net_now_ms() - t0 < 3000)
+        sleep_ms(20);
+    long long dt = net_now_ms() - t0;
+    CHECK(is_server_done());
+    CHECK(dt < 1500);
+    finish(&p); /* 이제 남은 것을 읽고 정리 */
+    reset_cfg();
+}
+
 static void test_total_deadline_trickle(void)
 {
     /* 매번 유휴 시간(300ms) 안에 1바이트씩 오므로 유휴 시간만으로는 못 막는다.
@@ -362,6 +405,7 @@ int main(void)
     RUN_TEST(test_idle_partial_header);
     RUN_TEST(test_idle_partial_body);
     RUN_TEST(test_total_deadline_trickle);
+    RUN_TEST(test_write_timeout_slow_reader);
 
     unlink(p);
     rmdir(tmpdir);
