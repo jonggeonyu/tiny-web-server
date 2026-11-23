@@ -69,7 +69,7 @@ static void test_not_running_refuses(void)
 {
     int sv[2];
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-    CHECK_EQ_INT(keepalive_park(sv[0], 1), -1); /* 아직 시작 전 → 못 맡음 (호출자가 닫아야 함) */
+    CHECK_EQ_INT(keepalive_park(sv[0], 1, 300), -1); /* 아직 시작 전 → 못 맡음 (호출자가 닫아야 함) */
     close(sv[0]);
     close(sv[1]);
 }
@@ -80,7 +80,7 @@ static void test_data_wakes_worker(void)
     int sv[2];
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     net_set_nonblock(sv[0]);
-    CHECK_EQ_INT(keepalive_park(sv[0], 7), 0);
+    CHECK_EQ_INT(keepalive_park(sv[0], 7, 300), 0);
 
     sleep_ms(100);
     CHECK_EQ_INT(calls(), 0); /* 아무것도 안 왔으니 일꾼은 부르지 않는다 */
@@ -100,7 +100,7 @@ static void test_peer_close(void)
     int sv[2];
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     net_set_nonblock(sv[0]);
-    CHECK_EQ_INT(keepalive_park(sv[0], 1), 0);
+    CHECK_EQ_INT(keepalive_park(sv[0], 1, 300), 0);
     close(sv[1]); /* 클라이언트가 그냥 닫음 */
     sleep_ms(100);
     CHECK(is_closed(sv[0]));  /* 보관 스레드가 알아서 닫음 */
@@ -114,7 +114,7 @@ static void test_idle_timeout(void)
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     net_set_nonblock(sv[0]);
     long long t0 = net_now_ms();
-    CHECK_EQ_INT(keepalive_park(sv[0], 1), 0);
+    CHECK_EQ_INT(keepalive_park(sv[0], 1, 300), 0);
     sleep_ms(150);
     CHECK(!is_closed(sv[0])); /* 아직 유휴 시간(300ms) 전 */
 
@@ -126,6 +126,27 @@ static void test_idle_timeout(void)
     CHECK(dt >= 250 && dt < 800);
     CHECK_EQ_INT(calls(), 0);
     close(sv[1]);
+}
+
+static void test_per_connection_timeout(void)
+{
+    /* 연결마다 유휴 시간이 다르다: 빈 연결(긴 시간)과 쉬는 keep-alive 연결(짧은 시간)을 함께 맡긴다 */
+    reset();
+    int a[2], b[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, a) == 0);
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, b) == 0);
+    net_set_nonblock(a[0]);
+    net_set_nonblock(b[0]);
+    CHECK_EQ_INT(keepalive_park(a[0], 0, 800), 0); /* 길게 */
+    CHECK_EQ_INT(keepalive_park(b[0], 3, 200), 0); /* 짧게 */
+    sleep_ms(450);
+    CHECK(is_closed(b[0]));  /* 짧은 쪽만 닫힘 */
+    CHECK(!is_closed(a[0]));
+    sleep_ms(600);
+    CHECK(is_closed(a[0]));  /* 긴 쪽도 시간이 지나 닫힘 */
+    CHECK_EQ_INT(calls(), 0);
+    close(a[1]);
+    close(b[1]);
 }
 
 static void test_capacity(void)
@@ -140,7 +161,7 @@ static void test_capacity(void)
         a[i] = sv[0];
         b[i] = sv[1];
         net_set_nonblock(a[i]);
-        if (keepalive_park(a[i], 0) == 0)
+        if (keepalive_park(a[i], 0, 300) == 0)
             ok++;
         else
             close(a[i]); /* 거절된 것은 호출자가 닫는다 */
@@ -153,7 +174,7 @@ static void test_capacity(void)
     int sv[2];
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     net_set_nonblock(sv[0]);
-    CHECK_EQ_INT(keepalive_park(sv[0], 0), 0);
+    CHECK_EQ_INT(keepalive_park(sv[0], 0, 300), 0);
     close(sv[1]);
     sleep_ms(100);
 }
@@ -165,11 +186,12 @@ int main(void)
 
     tp = threadpool_create(2, 16, job, NULL);
     CHECK(tp != NULL);
-    CHECK_EQ_INT(keepalive_start(tp, 300), 0);
+    CHECK_EQ_INT(keepalive_start(tp), 0);
 
     RUN_TEST(test_data_wakes_worker);
     RUN_TEST(test_peer_close);
     RUN_TEST(test_idle_timeout);
+    RUN_TEST(test_per_connection_timeout);
     RUN_TEST(test_capacity);
 
     keepalive_stop();

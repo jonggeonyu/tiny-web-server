@@ -15,6 +15,7 @@
 typedef struct {
     int fd;
     int served;
+    int timeout_ms;
 } parked;
 
 /* ---- 여러 스레드가 함께 쓰는 부분 (lock 으로 보호) ---- */
@@ -29,7 +30,6 @@ static int g_total = 0;                 /* 보관 중인 연결 총수 (pending 
 static pthread_t g_thread;
 static int g_wake[2] = {-1, -1};
 static threadpool *g_tp;
-static int g_idle_ms;
 
 typedef struct {
     int fd;
@@ -74,7 +74,7 @@ static void *keepalive_main(void *unused)
         for (int i = 0; i < g_npending; i++) {
             w[nw].fd = g_pending[i].fd;
             w[nw].served = g_pending[i].served;
-            w[nw].deadline = now + g_idle_ms;
+            w[nw].deadline = now + g_pending[i].timeout_ms; /* 연결마다 다른 유휴 시간 */
             nw++;
         }
         g_npending = 0;
@@ -141,14 +141,13 @@ static void *keepalive_main(void *unused)
     }
 }
 
-int keepalive_start(threadpool *tp, int idle_timeout_ms)
+int keepalive_start(threadpool *tp)
 {
     if (fd_pipe_cloexec(g_wake) < 0)
         return -1;
     net_set_nonblock(g_wake[0]);
     net_set_nonblock(g_wake[1]);
     g_tp = tp;
-    g_idle_ms = idle_timeout_ms;
     pthread_mutex_lock(&g_lock);
     g_stop = 0;
     g_npending = 0;
@@ -165,7 +164,7 @@ int keepalive_start(threadpool *tp, int idle_timeout_ms)
     return 0;
 }
 
-int keepalive_park(int fd, int served)
+int keepalive_park(int fd, int served, int timeout_ms)
 {
     pthread_mutex_lock(&g_lock);
     if (!g_running || g_stop || g_total >= KEEPALIVE_MAX) {
@@ -174,6 +173,7 @@ int keepalive_park(int fd, int served)
     }
     g_pending[g_npending].fd = fd;
     g_pending[g_npending].served = served;
+    g_pending[g_npending].timeout_ms = timeout_ms;
     g_npending++;
     g_total++;
     pthread_mutex_unlock(&g_lock);

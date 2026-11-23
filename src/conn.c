@@ -380,7 +380,7 @@ void conn_handle(int client_fd, const server_config *cfg, int served)
     if (end == END_PARK) {
         /* 쉬는 연결 → 보관 스레드에 맡기고 일꾼은 다음 일로. 맡길 수 없으면(가득 참) 닫는다
          * (서버는 쉬는 연결을 언제든 닫을 수 있고, 클라이언트는 새 연결로 다시 시도한다) */
-        if (keepalive_park(client_fd, served) < 0)
+        if (keepalive_park(client_fd, served, cfg->keepalive_timeout_ms) < 0)
             close(client_fd);
     } else if (end == END_LINGER) {
         linger_close(client_fd);

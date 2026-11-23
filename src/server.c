@@ -69,6 +69,22 @@ int server_listen(int port)
     return fd;
 }
 
+/* 논블로킹 소켓에 첫 바이트가 와 있는지 엿본다 (MSG_PEEK: 읽어도 소켓에 남김).
+ * 반환: 1 = 와 있음, 0 = 상대가 이미 닫음, -1 = 아직 없음(또는 확인 불가) */
+static int peek_first_byte(int fd)
+{
+    char c;
+    ssize_t n;
+    do {
+        n = recv(fd, &c, 1, MSG_PEEK);
+    } while (n < 0 && errno == EINTR);
+    if (n > 0)
+        return 1;
+    if (n == 0)
+        return 0;
+    return -1;
+}
+
 /* 일꾼이 할 일: 연결 하나 처리.
  * served = 그 연결에서 이미 처리한 요청 수 (새 연결 0, 보관 스레드에서 돌아온 연결은 그 값) */
 static void worker_job(int fd, int served, void *arg)
@@ -88,7 +104,7 @@ void server_run(int listen_fd, const server_config *cfg)
         return;
     }
     /* 쉬는 keep-alive 연결 보관 스레드 (다음 요청이 오면 tp 에 다시 넣는다) */
-    if (keepalive_start(tp, cfg->keepalive_timeout_ms) < 0)
+    if (keepalive_start(tp) < 0)
         fprintf(stderr, "keep-alive 보관 스레드 시작 실패 → 응답 후 연결을 닫습니다\n");
 
     long long rejected = 0;
@@ -112,6 +128,19 @@ void server_run(int listen_fd, const server_config *cfg)
         }
 
         /* 일꾼에게 넘긴다. 일꾼이 모두 바쁘고 대기열도 가득 차면 503 */
+        /* 첫 요청 바이트가 이미 와 있는가? (엿보기만 하고 소켓에 남겨 둔다)
+         *   - 와 있음(대부분의 클라이언트) → 바로 대기열로
+         *   - 아직 없음(미리 열어 둔 빈 연결 등) → 보관 스레드에 맡김. 일꾼이 빈 연결을 지키며 기다리지 않게
+         *   - 0바이트 = 연결하자마자 닫음 → 그냥 닫기 */
+        net_set_nonblock(client_fd);
+        int st = peek_first_byte(client_fd);
+        if (st == 0) {
+            close(client_fd);
+            continue;
+        }
+        if (st < 0 && keepalive_park(client_fd, 0, cfg->idle_timeout_ms) == 0)
+            continue; /* 보관 스레드가 첫 바이트를 기다린다 */
+
         /* 대기열이 가득 차면 요청을 읽지도 않고 바로 503. accept 스레드이므로 기다리지 않는다:
          * 작은 응답은 비어 있는 보내기 버퍼에 바로 써지고, 닫기는 linger 스레드에 넘긴다 */
         if (threadpool_submit(tp, client_fd, 0) < 0) {

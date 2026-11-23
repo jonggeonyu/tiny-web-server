@@ -218,6 +218,40 @@ check "마지막만 Connection: close" "keep-alive keep-alive close" "$(printf '
 check "HTTP/1.0 기본은 닫기 → 응답 1개" 1 "$(printf 'GET / HTTP/1.0\r\n\r\nGET / HTTP/1.0\r\n\r\n' | raw "$S_PORT" | grep -ac '^HTTP/1.1')"
 check "404 뒤에도 연결 유지 → 응답 2개" 2 "$(printf 'GET /nope HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' | raw "$S_PORT" | grep -ac '^HTTP/1.1')"
 
+# ================================================================== 빈 연결
+section "빈 연결 (첫 요청 전)"
+start_server E -t 1 -T 2 || exit 1
+UE=http://127.0.0.1:$E_PORT
+E_BASE=$(ls "/proc/$E_PID/fd" 2>/dev/null | wc -l)
+# 빈 연결 5개를 3초 동안 열어 둔다 (아무것도 보내지 않음). 끝나면 서버가 닫았는지(EOF) 개수를 출력
+timeout 10 python3 -I -c '
+import socket, sys, time
+port = int(sys.argv[1])
+socks = [socket.create_connection(("127.0.0.1", port)) for _ in range(5)]
+time.sleep(3)
+closed = 0
+for s in socks:
+    s.settimeout(1)
+    try:
+        closed += (s.recv(1) == b"")
+    except OSError:
+        pass
+print(closed)
+' "$E_PORT" > "$WORK/empty.out" &
+EP=$!
+sleep 0.5
+T=$($C -o /dev/null -w '%{http_code} %{time_total}' "$UE/")
+check "일꾼 1개 + 빈 연결 5개 → 새 요청 200" 200 "${T% *}"
+check_lt "그 새 요청이 0.5초 안에 (ms)" 500 "$(awk -v t="${T#* }" 'BEGIN{printf "%d", t*1000}')"
+check "연결 후 1초 쉬고 보낸 요청 → 200" "HTTP/1.1 200 OK" "$( (sleep 1; printf 'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n') | timeout 10 nc -q0 127.0.0.1 "$E_PORT" | first_line)"
+wait "$EP"
+check "빈 연결 5개는 유휴 2초 뒤 응답 없이 닫힘" 5 "$(cat "$WORK/empty.out")"
+if [ -z "$E2E_WRAP" ]; then
+    check "빈 연결이 정리된 뒤 fd 수가 시작 때와 같음" "$E_BASE" "$(ls "/proc/$E_PID/fd" | wc -l)"
+fi
+check "빈 연결에는 408 을 보내지 않음 (로그에 408 없음)" 0 "$(grep -c '408' "$E_LOG")"
+stop_server "$E_PID"
+
 # ================================================================== 동시 처리
 section "동시 처리"
 if [ "$E2E_SKIP_SLOW" = 1 ]; then
