@@ -202,10 +202,19 @@ static run_result run_cgi(const char *script, const char *dir, char **envp,
          * 멀티스레드 프로그램에서 fork 한 자식은 exec 전까지 "async-signal-safe" 함수만 써야 한다
          * (malloc, printf 금지: 다른 스레드가 잡고 있던 잠금이 풀리지 않은 채 복제됐을 수 있음).
          * 그래서 필요한 문자열(envp, argv, dir)은 모두 fork 전에 준비해 두었다. */
-        setpgid(0, 0); /* 새 프로세스 그룹: 나중에 손자까지 한 번에 종료할 수 있게 */
+        /* 여기서 무엇이든 실패하면 CGI 를 실행하지 않고 _exit(126) 으로 끝낸다
+         * (부모는 0 이 아닌 종료 코드를 보고 502 로 응답한다). 자식에서는 로그 출력도 하지 않는다:
+         * fprintf 는 async-signal-safe 가 아니다 */
 
-        dup2(to_cgi[0], STDIN_FILENO);    /* 표준 입력 ← 서버가 넣어 주는 본문 */
-        dup2(from_cgi[1], STDOUT_FILENO); /* 표준 출력 → 서버가 읽어 갈 응답 */
+        /* 새 프로세스 그룹: 나중에 손자까지 한 번에 종료(kill(-pid))할 수 있게.
+         * 실패한 채 실행하면 시간 초과 때 CGI 가 만든 손자 프로세스가 고아로 남을 수 있다 */
+        if (setpgid(0, 0) < 0)
+            _exit(126);
+
+        /* 표준 입력 ← 서버가 넣어 주는 본문, 표준 출력 → 서버가 읽어 갈 응답.
+         * dup2 가 실패한 채 실행하면 CGI 가 서버의 원래 표준 입출력(터미널 등)을 읽고 쓰게 된다 */
+        if (dup2(to_cgi[0], STDIN_FILENO) < 0 || dup2(from_cgi[1], STDOUT_FILENO) < 0)
+            _exit(126);
         /* 표준 에러(2)는 서버의 에러 로그로 그대로 둔다 */
 
         /* 보조 방어: 0,1,2 외의 fd 를 모두 닫는다 (주 방어는 FD_CLOEXEC) */
@@ -216,10 +225,10 @@ static run_result run_cgi(const char *script, const char *dir, char **envp,
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.sa_handler = SIG_DFL;
-        sigaction(SIGPIPE, &sa, NULL);
         sigset_t none;
-        sigemptyset(&none);
-        sigprocmask(SIG_SETMASK, &none, NULL);
+        if (sigemptyset(&sa.sa_mask) < 0 || sigaction(SIGPIPE, &sa, NULL) < 0 ||
+            sigemptyset(&none) < 0 || sigprocmask(SIG_SETMASK, &none, NULL) < 0)
+            _exit(126);
 
         if (chdir(dir) < 0) /* CGI 규칙: 스크립트가 있는 디렉토리에서 실행 */
             _exit(126);
@@ -230,7 +239,10 @@ static run_result run_cgi(const char *script, const char *dir, char **envp,
     }
 
     /* ===== 부모 (서버) ===== */
-    setpgid(pid, pid); /* 자식과 같은 일을 부모도: 누가 먼저 실행되든 그룹이 확실히 만들어지게 */
+    /* 자식과 같은 일을 부모도: 누가 먼저 실행되든 그룹이 확실히 만들어지게.
+     * 반환값을 일부러 보지 않는다: 자식이 이미 exec 했으면 EACCES, 이미 끝났으면 ESRCH 로 실패하는데,
+     * 두 경우 모두 자식 쪽 setpgid(0, 0) 이 먼저 성공한 것이다 (실패했다면 자식은 exec 전에 _exit 함) */
+    (void)setpgid(pid, pid);
     atomic_store(my_cgi_slot(), (int)pid); /* "지금 이 CGI 실행 중" 표시 (즉시 종료 때 정리용) */
 
     /* 자식이 쓸 끝은 부모에게 필요 없다. 특히 from_cgi[1] 을 안 닫으면
@@ -240,9 +252,12 @@ static run_result run_cgi(const char *script, const char *dir, char **envp,
     int wfd = to_cgi[1];
     int rfd = from_cgi[0];
 
-    /* 논블로킹: 쓸 공간/읽을 데이터가 없으면 기다리지 않고 바로 돌아오게 → poll 로 둘을 번갈아 처리 */
-    net_set_nonblock(wfd);
-    net_set_nonblock(rfd);
+    /* 논블로킹: 쓸 공간/읽을 데이터가 없으면 기다리지 않고 바로 돌아오게 → poll 로 둘을 번갈아 처리.
+     * 실패하면 블로킹 write 가 "CGI 는 출력이 막혀 입력을 안 읽고, 서버는 입력을 넣느라 출력을 안 읽는"
+     * 교착에 빠질 수 있다 → 실행하지 않은 것으로 치고 자식을 정리한다 (아래 5) 에서 kill + 회수 → 500) */
+    run_result result = RUN_OK;
+    if (net_set_nonblock(wfd) < 0 || net_set_nonblock(rfd) < 0)
+        result = RUN_SPAWN_FAIL;
 
     size_t body_len = body ? body->len : 0;
     size_t written = 0;
@@ -254,10 +269,9 @@ static run_result run_cgi(const char *script, const char *dir, char **envp,
     char *buf = NULL;
     size_t len = 0, cap = 0;
     long long deadline = net_now_ms() + timeout_ms;
-    run_result result = RUN_OK;
 
     /* 4) 교착 방지 루프: "쓸 수 있으면 쓰고, 읽을 게 있으면 읽는다"를 동시에 */
-    while (rfd >= 0) {
+    while (result == RUN_OK && rfd >= 0) {
         long long left = deadline - net_now_ms();
         if (left <= 0) {
             result = RUN_TIMEOUT;
@@ -412,7 +426,7 @@ void cgi_serve(const request_ctx *ctx, http_writer *w)
         free(out);
         return;
     case RUN_SPAWN_FAIL:
-        w->note = "pipe/fork 실패";
+        w->note = "pipe/fork/논블로킹 설정 실패";
         writer_send_error(w, 500);
         free(out);
         return;

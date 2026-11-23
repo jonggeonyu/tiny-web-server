@@ -148,8 +148,13 @@ int keepalive_start(threadpool *tp)
 {
     if (fd_pipe_cloexec(g_wake) < 0)
         return -1;
-    net_set_nonblock(g_wake[0]);
-    net_set_nonblock(g_wake[1]);
+    /* 깨우기 파이프가 블로킹이면, 가득 찼을 때 "깨우려던" 일꾼이 write 에서 멈춘다 → 시작하지 않는다
+     * (부르는 쪽은 실패하면 보관 스레드 없이 "응답 후 연결 닫기"로 동작한다) */
+    if (net_set_nonblock(g_wake[0]) < 0 || net_set_nonblock(g_wake[1]) < 0) {
+        close(g_wake[0]);
+        close(g_wake[1]);
+        return -1;
+    }
     g_tp = tp;
     pthread_mutex_lock(&g_lock);
     g_stop = 0;

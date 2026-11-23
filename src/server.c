@@ -33,8 +33,13 @@ int server_listen(int port)
         return -1;
     }
 
-    /* CGI 를 exec 할 때 이 소켓이 CGI 프로그램에 넘어가지 않도록 */
-    net_set_cloexec(fd);
+    /* CGI 를 exec 할 때 이 소켓이 CGI 프로그램에 넘어가지 않도록.
+     * 새어 나가면 서버를 꺼도 CGI 가 포트를 붙잡고 있어 다시 켤 수 없게 될 수 있다 */
+    if (net_set_cloexec(fd) < 0) {
+        fprintf(stderr, "듣기 소켓 FD_CLOEXEC 설정 실패: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
 
     /* SO_REUSEADDR: 서버를 껐다가 바로 다시 켤 때, 이전 연결의 흔적(TIME_WAIT) 때문에
      * "Address already in use" 로 bind 가 실패하는 것을 막는다. */
@@ -135,34 +140,50 @@ static void on_signal(int sig)
     errno = saved;
 }
 
+static void close_sig_pipe(void)
+{
+    close(g_sig_pipe[0]);
+    close(g_sig_pipe[1]);
+    g_sig_pipe[0] = g_sig_pipe[1] = -1;
+}
+
 static int install_signal_handlers(void)
 {
     if (fd_pipe_cloexec(g_sig_pipe) < 0)
         return -1;
-    net_set_nonblock(g_sig_pipe[0]);
-    net_set_nonblock(g_sig_pipe[1]);
+    /* 처리기의 write 는 절대 멈추면 안 된다 (멈추면 메인 스레드가 처리기 안에서 영원히 갇힌다).
+     * 파이프가 블로킹이면 가득 찼을 때 멈추므로, 논블로킹 설정이 실패하면 시작하지 않는다 */
+    if (net_set_nonblock(g_sig_pipe[0]) < 0 || net_set_nonblock(g_sig_pipe[1]) < 0) {
+        close_sig_pipe();
+        return -1;
+    }
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = on_signal;
-    sigemptyset(&sa.sa_mask);
-    sigaddset(&sa.sa_mask, SIGINT); /* 처리기가 도는 동안 두 신호가 겹쳐 끼어들지 않게 */
-    sigaddset(&sa.sa_mask, SIGTERM);
+    /* 처리기가 도는 동안 두 신호가 겹쳐 끼어들지 않게 */
+    if (sigemptyset(&sa.sa_mask) < 0 || sigaddset(&sa.sa_mask, SIGINT) < 0 ||
+        sigaddset(&sa.sa_mask, SIGTERM) < 0) {
+        close_sig_pipe();
+        return -1;
+    }
     sa.sa_flags = 0; /* SA_RESTART 없음: 기다리던 poll 이 EINTR 로 깨어나게 */
     /* 스크립트에서 & 로 띄우면 SIGINT 가 "무시"로 물려받아지는데, sigaction 으로 처리기를 등록하면 덮어쓴다 */
-    if (sigaction(SIGINT, &sa, NULL) < 0 || sigaction(SIGTERM, &sa, NULL) < 0)
+    if (sigaction(SIGINT, &sa, NULL) < 0 || sigaction(SIGTERM, &sa, NULL) < 0) {
+        close_sig_pipe();
         return -1;
+    }
     return 0;
 }
 
-/* SIGINT/SIGTERM 을 이 스레드에서 막거나(block) 풀기. 스레드는 만들어질 때 만든 스레드의 설정을 물려받는다 */
-static void block_stop_signals(int how)
+/* SIGINT/SIGTERM 을 이 스레드에서 막거나(block) 풀기. 스레드는 만들어질 때 만든 스레드의 설정을 물려받는다.
+ * 반환: 0 = 성공, 그 밖 = 에러 번호 (pthread_* 는 errno 대신 반환값으로 알려준다) */
+static int block_stop_signals(int how)
 {
     sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGINT);
-    sigaddset(&set, SIGTERM);
-    pthread_sigmask(how, &set, NULL);
+    if (sigemptyset(&set) < 0 || sigaddset(&set, SIGINT) < 0 || sigaddset(&set, SIGTERM) < 0)
+        return EINVAL;
+    return pthread_sigmask(how, &set, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -205,7 +226,14 @@ static void accept_one(int listen_fd, threadpool *tp, const server_config *cfg, 
      *   - 와 있음(대부분의 클라이언트) → 바로 대기열로
      *   - 아직 없음(미리 열어 둔 빈 연결 등) → 보관 스레드에 맡김. 일꾼이 빈 연결을 지키며 기다리지 않게
      *   - 0바이트 = 연결하자마자 닫음 → 그냥 닫기 */
-    net_set_nonblock(client_fd);
+    /* 논블로킹이 아니면 아래 엿보기(recv)가 첫 바이트를 기다리며 accept 스레드 전체를 멈춘다 → 이 연결은 포기 */
+    if (net_set_nonblock(client_fd) < 0) {
+        char eb[128];
+        fprintf(stderr, "[main] 새 연결 논블로킹 설정 실패: %s → 연결 닫음\n",
+                net_errstr(errno, eb, sizeof(eb)));
+        close(client_fd);
+        return;
+    }
     int st = peek_first_byte(client_fd);
     if (st == 0) {
         close(client_fd);
@@ -224,17 +252,32 @@ static void accept_one(int listen_fd, threadpool *tp, const server_config *cfg, 
     }
 }
 
-void server_run(int listen_fd, const server_config *cfg)
+int server_run(int listen_fd, const server_config *cfg)
 {
+    /* 듣기 소켓도 논블로킹: poll 이 "연결 있음"이라 해도 accept 전에 상대가 끊으면 accept 가 멈출 수 있다.
+     * 스레드를 만들기 전에 해 둔다 → 실패하면 정리할 것 없이 바로 끝낼 수 있다 */
+    if (net_set_nonblock(listen_fd) < 0) {
+        fprintf(stderr, "듣기 소켓 논블로킹 설정 실패: %s\n", strerror(errno));
+        close(listen_fd);
+        return -1;
+    }
+
     if (install_signal_handlers() < 0) {
         fprintf(stderr, "시그널 처리기 등록 실패\n");
         close(listen_fd);
-        return;
+        return -1;
     }
 
     /* 다른 스레드를 만들기 "전에" 종료 신호를 막아 둔다 → 새 스레드는 막힌 상태를 물려받는다.
-     * 그러면 신호는 막지 않은 메인 스레드에게만 배달된다 (스레드를 다 만든 뒤 메인만 다시 푼다) */
-    block_stop_signals(SIG_BLOCK);
+     * 그러면 신호는 막지 않은 메인 스레드에게만 배달된다 (스레드를 다 만든 뒤 메인만 다시 푼다).
+     * 실패한 채 진행하면 일꾼 스레드가 신호를 받아 poll 하던 메인 루프가 늦게 깨어날 수 있다 → 시작하지 않는다 */
+    int err = block_stop_signals(SIG_BLOCK);
+    if (err != 0) {
+        fprintf(stderr, "종료 신호 막기(pthread_sigmask) 실패 (에러 %d)\n", err);
+        close_sig_pipe();
+        close(listen_fd);
+        return -1;
+    }
 
     if (linger_start() < 0)
         fprintf(stderr, "linger 스레드 시작 실패 → 일꾼이 직접 부드럽게 닫습니다\n");
@@ -242,20 +285,25 @@ void server_run(int listen_fd, const server_config *cfg)
     if (!tp) {
         fprintf(stderr, "스레드 풀 생성 실패\n");
         linger_stop();
+        close_sig_pipe();
         close(listen_fd);
-        return;
+        return -1;
     }
     /* 쉬는 keep-alive 연결 보관 스레드 (다음 요청이 오면 tp 에 다시 넣는다) */
     if (keepalive_start(tp) < 0)
         fprintf(stderr, "keep-alive 보관 스레드 시작 실패 → 응답 후 연결을 닫습니다\n");
 
-    block_stop_signals(SIG_UNBLOCK); /* 이제 메인 스레드만 신호를 받는다 */
-
-    /* 듣기 소켓도 논블로킹: poll 이 "연결 있음"이라 해도 accept 전에 상대가 끊으면 accept 가 멈출 수 있다 */
-    net_set_nonblock(listen_fd);
+    /* 이제 메인 스레드만 신호를 받는다. 풀지 못하면 모든 스레드가 신호를 막고 있어 Ctrl+C 가 영영 닿지 않는다
+     * → 연결을 받지 않고 곧바로 아래 정리 단계로 가서 끝낸다 */
+    int accepting = 1;
+    err = block_stop_signals(SIG_UNBLOCK);
+    if (err != 0) {
+        fprintf(stderr, "종료 신호 풀기(pthread_sigmask) 실패 (에러 %d) → 바로 종료합니다\n", err);
+        accepting = 0;
+    }
 
     long long rejected = 0;
-    while (!g_signals) {
+    while (accepting && !g_signals) {
         /* 새 연결 또는 종료 신호(깨우기 파이프), 둘 중 먼저 오는 것을 기다린다 */
         struct pollfd pfd[2] = {
             {.fd = listen_fd, .events = POLLIN},
@@ -272,8 +320,11 @@ void server_run(int listen_fd, const server_config *cfg)
 
     /* ===== 안전한 종료 ===== */
     long long t0 = net_now_ms();
-    printf("\n[main] 종료 신호(%s) 받음 → 새 연결 받기 중단\n",
-           g_last_sig == SIGTERM ? "SIGTERM" : "SIGINT");
+    if (accepting)
+        printf("\n[main] 종료 신호(%s) 받음 → 새 연결 받기 중단\n",
+               g_last_sig == SIGTERM ? "SIGTERM" : "SIGINT");
+    else
+        printf("\n[main] 시작 준비 실패 → 정리 후 종료\n");
     fflush(stdout);
 
     /* ⓐ 새 연결 받기 중단: 듣기 소켓을 닫으면 이후 접속 시도는 거절된다 */
@@ -301,10 +352,10 @@ void server_run(int listen_fd, const server_config *cfg)
 
     /* ⓔ 부드럽게 닫던 연결 정리, 종료 신호용 파이프 닫기 */
     linger_stop();
-    close(g_sig_pipe[0]);
-    close(g_sig_pipe[1]);
+    close_sig_pipe();
 
     printf("[main] 종료 완료: 처리한 요청 %lld개, 503 %lld건, 남아 있던 CGI 자식 %d개, 정리에 %lldms\n",
            conn_total_requests(), rejected, strays, net_now_ms() - t0);
     fflush(stdout);
+    return accepting ? 0 : -1;
 }

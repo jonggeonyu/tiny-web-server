@@ -251,7 +251,11 @@ static void peer_name(int fd, char *addr, size_t cap, int *port)
 
 void conn_reject_busy(int fd)
 {
-    net_set_nonblock(fd);
+    /* 블로킹 소켓에 쓰면 받아 가지 않는 클라이언트 앞에서 accept/보관 스레드가 멈춘다 → 503 없이 그냥 닫는다 */
+    if (net_set_nonblock(fd) < 0) {
+        close(fd);
+        return;
+    }
     http_writer w;
     writer_init(&w, fd);
     w.write_timeout_ms = 200; /* 부르는 쪽(accept/보관 스레드)을 오래 붙잡지 않게 */
@@ -274,8 +278,15 @@ void conn_handle(int client_fd, const server_config *cfg, int served)
     peer_name(client_fd, remote_addr, sizeof(remote_addr), &remote_port);
 
     /* 논블로킹: 읽기는 늘 poll 로 기다린 뒤 하고, 쓰기는 writer 가 "진전 없는 시간"을 재며 기다린다.
-     * (블로킹 write 는 받아 가지 않는 클라이언트 앞에서 끝없이 멈춰 일꾼을 묶는다) */
-    net_set_nonblock(client_fd);
+     * (블로킹 write 는 받아 가지 않는 클라이언트 앞에서 끝없이 멈춰 일꾼을 묶는다)
+     * 그래서 실패하면 시간 제한을 지킬 수 없으므로 이 연결은 처리하지 않고 닫는다 */
+    if (net_set_nonblock(client_fd) < 0) {
+        char eb[128];
+        fprintf(stderr, WTAG "논블로킹 설정 실패: %s → 연결 닫음\n", wid,
+                net_errstr(errno, eb, sizeof(eb)));
+        close(client_fd);
+        return;
+    }
 
     /* TCP_NODELAY: 작은 조각도 기다리지 말고 바로 보낸다.
      * 기본값(Nagle 알고리즘)에서는 응답 머리를 보낸 뒤 본문 조각을 "앞 조각의 ACK 가 올 때까지" 붙잡는데,

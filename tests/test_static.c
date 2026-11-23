@@ -27,11 +27,13 @@
 #include "path.h"
 #include "writer.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -229,6 +231,74 @@ static void test_methods(void)
     CHECK_EQ_INT(serve("POST", "/nope.html").status, 404); /* 없는 파일은 404 가 먼저 */
 }
 
+/* 500: 파일은 있는데 "서버 쪽 사정"으로 못 여는 경우.
+ * fd(운영체제가 열린 파일/소켓마다 주는 번호표)를 이 테스트 프로세스에서 일부러 다 써 버려서
+ * open() 이 EMFILE("번호표가 없음")로 실패하게 만든다. 서버 코드는 바꾸지 않는다:
+ * 실제 서버에서도 동시 연결이 아주 많으면 생길 수 있는 상황이다. */
+#define FILL_LIMIT 64
+
+static void test_500_when_fds_exhausted(void)
+{
+    char raw[] = "GET /hello.txt HTTP/1.1\r\nHost: t\r\n\r\n";
+    CHECK_EQ_INT(http_parse_request(raw, strlen(raw), &req), HTTP_PARSE_OK);
+
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    http_writer w;
+    writer_init(&w, sv[0]);
+
+    /* 1) fd 한도(soft limit)를 잠시 64로 낮춘다. 그래야 몇십 번만 dup 해도 바닥난다
+     *    (기본 한도가 수십만이면 그만큼 열어야 하므로) */
+    struct rlimit old;
+    CHECK(getrlimit(RLIMIT_NOFILE, &old) == 0);
+    struct rlimit low = old;
+    if (low.rlim_cur == RLIM_INFINITY || low.rlim_cur > FILL_LIMIT)
+        low.rlim_cur = FILL_LIMIT;
+    CHECK(setrlimit(RLIMIT_NOFILE, &low) == 0);
+
+    /* 2) 남은 번호를 dup 으로 모두 채운다. dup 은 "비어 있는 가장 작은 번호"를 쓰므로
+     *    한도 아래 번호는 많아야 FILL_LIMIT 개 → 배열 크기도 그만큼이면 충분하다 */
+    int fillers[FILL_LIMIT];
+    int nfill = 0;
+    int last_errno = 0;
+    while (nfill < FILL_LIMIT) {
+        int fd = dup(sv[0]);
+        if (fd < 0) {
+            last_errno = errno;
+            break;
+        }
+        fillers[nfill++] = fd;
+    }
+    CHECK_EQ_INT(last_errno, EMFILE); /* 정말로 바닥났는가 (아니면 이 테스트가 의미 없음) */
+
+    /* 3) 이 상태에서 정상 파일을 요청 → open() 실패 → 500 */
+    static_serve(root, &req, "/hello.txt", &w);
+
+    /* 4) 원래대로: 채운 fd 를 닫고 한도를 되돌린다 (응답을 읽기 전에 해야 아래 read 가 EOF 를 본다:
+     *    dup 한 번호들도 같은 소켓을 가리키므로, 다 닫혀야 상대가 "끝"을 알 수 있다) */
+    for (int i = 0; i < nfill; i++)
+        close(fillers[i]);
+    CHECK(setrlimit(RLIMIT_NOFILE, &old) == 0);
+
+    close(sv[0]);
+    size_t total = 0;
+    ssize_t n;
+    while ((n = read(sv[1], got + total, sizeof(got) - 1 - total)) > 0)
+        total += (size_t)n;
+    got[total] = '\0';
+    close(sv[1]);
+
+    CHECK_EQ_INT(w.status, 500);
+    CHECK(strncmp(got, "HTTP/1.1 500 Internal Server Error\r\n", 36) == 0);
+    CHECK(strstr(got, "\r\nConnection: close\r\n") != NULL); /* 500 뒤에는 연결을 유지하지 않는다 */
+    CHECK(strstr(body_of(got), "500") != NULL);              /* 오류 안내 본문 */
+    CHECK(strstr(got, "hello") == NULL);                     /* 파일 내용은 나가지 않음 */
+
+    /* 5) fd 가 돌아오면 같은 요청이 다시 정상 처리된다 (서버가 망가진 상태로 남지 않음) */
+    CHECK_EQ_INT(serve("GET", "/hello.txt").status, 200);
+    CHECK_EQ_STR(body_of(got), "hello");
+}
+
 int main(void)
 {
     setup();
@@ -238,6 +308,7 @@ int main(void)
     RUN_TEST(test_escape_blocked);
     RUN_TEST(test_permission);
     RUN_TEST(test_methods);
+    RUN_TEST(test_500_when_fds_exhausted);
     teardown();
     return TEST_REPORT();
 }

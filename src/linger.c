@@ -53,7 +53,10 @@ static void *linger_main(void *unused)
             act[nact].fd = g_pending[i];
             act[nact].deadline = now + LINGER_TIMEOUT_MS;
             act[nact].drained = 0;
-            net_set_nonblock(act[nact].fd); /* 읽어 버리기만 하므로 기다리지 않게 */
+            /* 읽어 버리기만 하므로 기다리지 않게. 실패하면 블로킹 read 가 이 스레드를 멈출 수 있다
+             * → 마감을 "지금"으로 해서 아래 3) 에서 바로 닫히게 한다 */
+            if (net_set_nonblock(act[nact].fd) < 0)
+                act[nact].deadline = now;
             nact++;
         }
         g_npending = 0;
@@ -123,8 +126,13 @@ int linger_start(void)
 {
     if (fd_pipe_cloexec(g_wake) < 0)
         return -1;
-    net_set_nonblock(g_wake[0]);
-    net_set_nonblock(g_wake[1]);
+    /* 깨우기 파이프가 블로킹이면, 가득 찼을 때 fd 를 넘기던 일꾼이 write 에서 멈춘다 → 시작하지 않는다
+     * (부르는 쪽은 실패하면 전용 스레드 없이 일꾼이 직접 부드럽게 닫는다) */
+    if (net_set_nonblock(g_wake[0]) < 0 || net_set_nonblock(g_wake[1]) < 0) {
+        close(g_wake[0]);
+        close(g_wake[1]);
+        return -1;
+    }
     if (pthread_create(&g_thread, NULL, linger_main, NULL) != 0) {
         close(g_wake[0]);
         close(g_wake[1]);

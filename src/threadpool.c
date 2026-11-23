@@ -32,6 +32,10 @@ struct threadpool {
     int shutdown; /* 1 이면 더 받지 않고, 남은 일을 처리한 뒤 일꾼 종료 */
     int busy;     /* 지금 일하는 중인 일꾼 수 */
 
+    /* 초기화에 성공했는가. 실패한 자물쇠/조건 변수를 destroy 하는 것은 정의되지 않은 동작이라 따로 기억한다 */
+    int lock_ready;
+    int cond_ready;
+
     pthread_t *threads;
     worker_start *starts; /* 일꾼에게 넘긴 시작 정보 (풀이 끝날 때까지 살아 있어야 함) */
     int nthreads;
@@ -109,8 +113,10 @@ void threadpool_stats(threadpool *tp, int *busy, int *queued)
 
 static void free_pool(threadpool *tp)
 {
-    pthread_mutex_destroy(&tp->lock);
-    pthread_cond_destroy(&tp->not_empty);
+    if (tp->lock_ready)
+        pthread_mutex_destroy(&tp->lock);
+    if (tp->cond_ready)
+        pthread_cond_destroy(&tp->not_empty);
     free(tp->queue);
     free(tp->threads);
     free(tp->starts);
@@ -143,31 +149,53 @@ threadpool *threadpool_create(int nthreads, int queue_cap, tp_job_fn fn, void *a
     tp->queue = calloc((size_t)queue_cap, sizeof(tp_item));
     tp->threads = calloc((size_t)nthreads, sizeof(pthread_t));
     tp->starts = calloc((size_t)nthreads, sizeof(worker_start));
-    pthread_mutex_init(&tp->lock, NULL);
-    pthread_cond_init(&tp->not_empty, NULL);
     if (!tp->queue || !tp->threads || !tp->starts) {
         free_pool(tp);
         return NULL;
     }
+    /* pthread_* 함수는 errno 를 쓰지 않고 에러 번호를 "반환값"으로 돌려준다 (0 = 성공).
+     * 자물쇠 없이 대기열을 만지면 여러 일꾼이 같은 일을 꺼내 가는 등 조용히 망가지므로, 실패하면 풀을 만들지 않는다 */
+    int err = pthread_mutex_init(&tp->lock, NULL);
+    if (err != 0) {
+        fprintf(stderr, "스레드 풀 자물쇠 초기화 실패 (에러 %d)\n", err);
+        free_pool(tp);
+        return NULL;
+    }
+    tp->lock_ready = 1;
+    err = pthread_cond_init(&tp->not_empty, NULL);
+    if (err != 0) {
+        fprintf(stderr, "스레드 풀 조건 변수 초기화 실패 (에러 %d)\n", err);
+        free_pool(tp);
+        return NULL;
+    }
+    tp->cond_ready = 1;
     tp->cap = queue_cap;
     tp->fn = fn;
     tp->arg = arg;
 
+    /* 스레드 속성(스택 크기)은 "있으면 좋은" 설정: 실패하면 기본 속성으로 만든다 (기본 스택이 커질 뿐 동작은 같음) */
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, WORKER_STACK_SIZE);
+    int have_attr = (pthread_attr_init(&attr) == 0);
+    if (!have_attr)
+        fprintf(stderr, "스레드 속성 초기화 실패 → 기본 스택 크기로 일꾼을 만듭니다\n");
+    else if ((err = pthread_attr_setstacksize(&attr, WORKER_STACK_SIZE)) != 0)
+        fprintf(stderr, "일꾼 스택 크기 설정 실패 (에러 %d) → 기본 스택 크기 사용\n", err);
 
     for (int i = 0; i < nthreads; i++) {
         tp->starts[i].tp = tp;
         tp->starts[i].id = i + 1;
-        if (pthread_create(&tp->threads[i], &attr, worker_main, &tp->starts[i]) != 0) {
-            fprintf(stderr, "일꾼 스레드 생성 실패 (%d번째)\n", i + 1);
-            pthread_attr_destroy(&attr);
+        err = pthread_create(&tp->threads[i], have_attr ? &attr : NULL, worker_main,
+                             &tp->starts[i]);
+        if (err != 0) {
+            fprintf(stderr, "일꾼 스레드 생성 실패 (%d번째, 에러 %d)\n", i + 1, err);
+            if (have_attr)
+                pthread_attr_destroy(&attr);
             threadpool_destroy(tp); /* 이미 만든 일꾼(tp->nthreads 개)만 정리 */
             return NULL;
         }
         tp->nthreads = i + 1;
     }
-    pthread_attr_destroy(&attr);
+    if (have_attr)
+        pthread_attr_destroy(&attr);
     return tp;
 }

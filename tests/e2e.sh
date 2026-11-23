@@ -197,6 +197,38 @@ check "Content-Length 19자리 → 413" "HTTP/1.1 413 Content Too Large" "$(prin
 check "Content-Length 두 개가 다름 → 400" "HTTP/1.1 400 Bad Request" "$(printf 'POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab' | raw "$S_PORT" | first_line)"
 check "헤더 보내다 멈춤 → 408 (유휴 2초)" "HTTP/1.1 408 Request Timeout" "$( (printf 'GET / HTTP/1.1\r\nHo'; sleep 4) | timeout 10 nc -q0 127.0.0.1 "$S_PORT" | first_line)"
 
+# ================================================================== 시작 실패
+section "시작 실패 (포트 충돌, 잘못된 -p)"
+# 서버를 띄우려다 실패해야 하는 경우들. 실수로 떠 버리면 끝나지 않으므로 timeout 으로 감싼다
+# (5초 뒤 강제 종료 → 종료 코드 124 가 나와서 "1 이 아님"으로 실패가 드러난다).
+# valgrind 로 감싸지 않는다: 느린 시작 때문에 5초 제한과 맞지 않고, 바로 끝나는 프로세스라 검사할 것도 적다.
+# start_fail 인자... → 출력은 START_OUT, 종료 코드는 START_RC 에
+start_fail() {
+    START_OUT=$(timeout 5 "$E2E_BIN" "$@" -r "$ROOT" -c "$CGI" 2>&1)
+    START_RC=$?
+}
+
+# 이미 주 서버(S)가 쓰고 있는 포트로 하나 더 띄운다 → bind 가 EADDRINUSE 로 실패해야 한다
+start_fail -p "$S_PORT"
+check "포트 충돌 → 종료 코드 1" 1 "$START_RC"
+check_has "포트 충돌: bind 실패 메시지" "bind 실패 (포트 $S_PORT)" "$START_OUT"
+check_has "포트 충돌: 원인 (Address already in use)" "Address already in use" "$START_OUT"
+check "포트 충돌 뒤에도 원래 서버는 정상" 200 "$(status "$U/")"
+
+# 잘못된 포트 값: 숫자 아님, 범위 밖(1~65535), 뒤에 글자가 붙음, 빈 값
+for p in abc 0 65536 99999 -1 80x ""; do
+    start_fail -p "$p"
+    check "-p '$p' → 종료 코드 1" 1 "$START_RC"
+    check_has "-p '$p' → '잘못된 포트 번호' 메시지" "잘못된 포트 번호" "$START_OUT"
+    check "-p '$p' → 서버가 시작되지 않음" "" "$(printf '%s' "$START_OUT" | grep '서버 시작')"
+done
+
+# -p 뒤에 값이 아예 없음 → getopt 가 거절, 사용법 출력
+START_OUT=$(timeout 5 "$E2E_BIN" -p 2>&1)
+START_RC=$?
+check "-p 값 없음 → 종료 코드 1" 1 "$START_RC"
+check_has "-p 값 없음 → 사용법 출력" "사용법:" "$START_OUT"
+
 # ================================================================== 본문
 section "POST 본문"
 check "짧은 POST echo" "name=kim" "$($C -d 'name=kim' "$U/echo")"
