@@ -1,0 +1,8 @@
+labs/
+*.o
+build/
+*.d
+cgi-bin/adder
+PLAN.md
+PROJECT.md
+CLAUDE.md
