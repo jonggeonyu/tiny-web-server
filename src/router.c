@@ -8,15 +8,18 @@
 
 #include <string.h>
 
-route router_match(const char *method, const char *path, const char *proxy_prefix)
+route router_match(const char *method, const char *path, const proxy_config *proxy)
 {
     route rt;
     int is_post = (strcmp(method, "POST") == 0);
+    rt.proxy_route = -1;
 
     /* 프록시를 가장 먼저: "/" 로 전부 프록시하면 /cgi-bin 도 백엔드가 처리한다 */
-    if (proxy_is_match(proxy_prefix, path)) {
+    int index = proxy_find_route(proxy, path);
+    if (index >= 0) {
         rt.kind = ROUTE_PROXY;
         rt.wants_body = 1; /* 메서드와 상관없이, 본문이 있으면 백엔드로 그대로 넘긴다 */
+        rt.proxy_route = index;
         return rt;
     }
 
@@ -50,7 +53,7 @@ void router_dispatch(const route *rt, const request_ctx *ctx, http_writer *w)
         static_serve(ctx->cfg->root, ctx->req, ctx->path, w);
         break;
     case ROUTE_PROXY:
-        proxy_serve(ctx, w);
+        proxy_serve(ctx, rt->proxy_route, w);
         break;
     }
 }

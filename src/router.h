@@ -1,7 +1,7 @@
 /*
  * router: 요청을 어느 처리기(handler)로 보낼지 정한다.
  *
- *   -P 로 정한 prefix   → 프록시 처리기 (백엔드로 전달, 가장 먼저 검사)
+ *   -P 로 정한 prefix   → 프록시 처리기 (가장 먼저 검사, 여러 그룹이면 가장 긴 prefix)
  *   /echo                → echo 처리기 (POST 본문을 그대로 돌려줌, 확인용)
  *   /cgi-bin, /cgi-bin/… → CGI 처리기
  *   그 밖                → 정적 파일 처리기
@@ -25,11 +25,12 @@ typedef enum {
 typedef struct {
     route_kind kind;
     int wants_body; /* 1 = 처리기가 본문을 사용함 → conn 이 본문을 읽어서 넘겨준다 */
+    int proxy_route; /* ROUTE_PROXY 일 때: cfg->proxy.routes[] 의 몇 번 그룹인지. 그 밖에는 -1 */
 } route;
 
 /* method, path(정규화된 경로)로 경로 규칙을 고른다.
- * proxy_prefix: 프록시할 경로 prefix (cfg->proxy.prefix). 빈 문자열이면 프록시 끔 */
-route router_match(const char *method, const char *path, const char *proxy_prefix);
+ * proxy: 프록시 그룹 목록 (&cfg->proxy). NULL 이거나 그룹이 없으면 프록시 끔 */
+route router_match(const char *method, const char *path, const proxy_config *proxy);
 
 /* 고른 처리기를 실행한다 */
 void router_dispatch(const route *rt, const request_ctx *ctx, http_writer *w);

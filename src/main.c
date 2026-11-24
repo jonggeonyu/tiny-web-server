@@ -36,28 +36,43 @@ static void usage(const char *prog)
             DEFAULT_IDLE_TIMEOUT_MS / 1000);
     fprintf(stderr, "  -S 초     종료 신호 뒤 처리 중인 요청을 기다리는 최대 시간, 0 = 무제한 (기본값 %d)\n",
             DEFAULT_SHUTDOWN_TIMEOUT_S);
-    fprintf(stderr, "  -P 규칙   리버스 프록시: 경로가 이 prefix 로 시작하면 백엔드들에 번갈아 전달 (최대 %d개)\n"
-                    "            예: -P /api=127.0.0.1:8001,127.0.0.1:8002   (/ 로 쓰면 모든 요청)\n",
-            PROXY_MAX_BACKENDS);
+    fprintf(stderr, "  -P 규칙   리버스 프록시: 경로가 이 prefix 로 시작하면 백엔드들에 번갈아 전달 (그룹당 최대 %d개)\n"
+                    "            예: -P /api=127.0.0.1:8001,127.0.0.1:8002   (/ 로 쓰면 모든 요청)\n"
+                    "            여러 번 쓰면 그룹 여러 개 (최대 %d개), 겹치면 가장 긴 prefix 우선\n",
+            PROXY_MAX_BACKENDS, PROXY_MAX_ROUTES);
     fprintf(stderr, "  -W 초     프록시가 백엔드 응답을 기다리는 최대 시간. 넘으면 504 (기본값 %d)\n",
             DEFAULT_PROXY_RESPONSE_TIMEOUT_MS / 1000);
 }
 
-/* -P 인자 해석 + 백엔드 주소 해석 + 자기 자신을 가리키는지 검사 (자기 자신이면 요청이 끝없이 돈다) */
-static int setup_proxy(const char *spec, server_config *cfg)
+/* 백엔드가 자기 자신을 가리키는지 검사 (자기 자신이면 요청이 끝없이 돈다) */
+static int check_not_self(const proxy_route *route, int own_port)
 {
-    char err[512];
-    if (proxy_parse_spec(spec, &cfg->proxy, err, sizeof(err)) < 0 ||
-        proxy_resolve_backends(&cfg->proxy, err, sizeof(err)) < 0) {
-        fprintf(stderr, "잘못된 프록시 설정 -P %s: %s\n", spec, err);
-        return -1;
-    }
-    for (int i = 0; i < cfg->proxy.backend_count; i++) {
-        if (proxy_is_self(&cfg->proxy.backends[i], cfg->port)) {
+    for (int i = 0; i < route->backend_count; i++) {
+        if (proxy_is_self(&route->backends[i], own_port)) {
             fprintf(stderr, "잘못된 프록시 설정: 백엔드 %s 가 이 서버 자신임 (요청이 끝없이 돎)\n",
-                    cfg->proxy.backends[i].label);
+                    route->backends[i].label);
             return -1;
         }
+    }
+    return 0;
+}
+
+/* -P 인자들 해석 + 백엔드 주소 해석 + 자기 자신 검사 */
+static int setup_proxy(const char *const *specs, int count, server_config *cfg)
+{
+    char err[512];
+    for (int i = 0; i < count; i++) {
+        if (proxy_add_route(&cfg->proxy, specs[i], err, sizeof(err)) < 0) {
+            fprintf(stderr, "잘못된 프록시 설정 -P %s: %s\n", specs[i], err);
+            return -1;
+        }
+        if (check_not_self(&cfg->proxy.routes[i], cfg->port) < 0) {
+            return -1;
+        }
+    }
+    if (proxy_resolve_backends(&cfg->proxy, err, sizeof(err)) < 0) {
+        fprintf(stderr, "잘못된 프록시 설정: %s\n", err);
+        return -1;
     }
     return 0;
 }
@@ -120,7 +135,9 @@ int main(int argc, char **argv)
     cfg.queue_size = 0; /* 0 = 일꾼 수에 맞춰 아래에서 계산 */
     cfg.shutdown_timeout_s = DEFAULT_SHUTDOWN_TIMEOUT_S;
     cfg.proxy.response_timeout_ms = DEFAULT_PROXY_RESPONSE_TIMEOUT_MS;
-    const char *proxy_arg = NULL; /* 포트를 다 읽은 뒤에 검사해야 하므로(자기 자신 검사) 나중에 해석 */
+    /* -P 는 포트를 다 읽은 뒤에 검사해야 하므로(자기 자신 검사) 모아 뒀다가 나중에 해석 */
+    const char *proxy_args[PROXY_MAX_ROUTES];
+    int proxy_arg_count = 0;
     const char *root_arg = DEFAULT_ROOT;
     const char *cgi_arg = DEFAULT_CGI_DIR;
     int opt;
@@ -176,7 +193,11 @@ int main(int argc, char **argv)
             break;
         }
         case 'P':
-            proxy_arg = optarg;
+            if (proxy_arg_count >= PROXY_MAX_ROUTES) {
+                fprintf(stderr, "프록시 그룹(-P)은 최대 %d개\n", PROXY_MAX_ROUTES);
+                return 1;
+            }
+            proxy_args[proxy_arg_count++] = optarg;
             break;
         case 'W': {
             int sec = parse_port(optarg); /* 1 이상 정수 검사를 재사용 */
@@ -204,7 +225,7 @@ int main(int argc, char **argv)
             cfg.queue_size = MAX_QUEUE;
     }
 
-    if (proxy_arg != NULL && setup_proxy(proxy_arg, &cfg) < 0)
+    if (setup_proxy(proxy_args, proxy_arg_count, &cfg) < 0)
         return 1;
     if (resolve_root(root_arg, cfg.root) < 0)
         return 1;
@@ -233,10 +254,11 @@ int main(int argc, char **argv)
            cfg.cgi_dir[0] ? cfg.cgi_dir : "(꺼짐)");
     printf("  일꾼 %d개, 대기열 %d칸, keep-alive 유휴 %d초 / 연결당 최대 %d요청  (종료: Ctrl+C)\n",
            cfg.threads, cfg.queue_size, cfg.keepalive_timeout_ms / 1000, cfg.max_requests);
-    if (cfg.proxy.backend_count > 0) {
-        printf("  리버스 프록시: %s →", cfg.proxy.prefix);
-        for (int i = 0; i < cfg.proxy.backend_count; i++)
-            printf(" %s", cfg.proxy.backends[i].label);
+    for (int r = 0; r < cfg.proxy.route_count; r++) {
+        const proxy_route *route = &cfg.proxy.routes[r];
+        printf("  리버스 프록시: %s →", route->prefix);
+        for (int i = 0; i < route->backend_count; i++)
+            printf(" %s", route->backends[i].label);
         printf("  (라운드로빈, 응답 대기 %d초)\n", cfg.proxy.response_timeout_ms / 1000);
     }
     fflush(stdout);

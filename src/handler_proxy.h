@@ -19,9 +19,10 @@
 
 #include <stddef.h>
 
-void proxy_serve(const request_ctx *ctx, http_writer *w);
+/* route_index: router 가 고른 그룹 번호 (ctx->cfg->proxy.routes[route_index]) */
+void proxy_serve(const request_ctx *ctx, int route_index, http_writer *w);
 
-/* 시작할 때 한 번: 백엔드 주소를 해석해서 backends[].addr 에 저장한다 (요청마다 DNS 조회를 하지 않기 위해).
+/* 시작할 때 한 번: 모든 그룹의 백엔드 주소를 해석해서 backends[].addr 에 저장한다 (요청마다 DNS 조회를 하지 않기 위해).
  * 반환: 0 성공, -1 실패 (err 에 이유) */
 int proxy_resolve_backends(proxy_config *proxy, char *err, size_t err_cap);
 

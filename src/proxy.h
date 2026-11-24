@@ -38,10 +38,18 @@ typedef struct {
     const char *connection;        /* Connection 헤더 값, 없으면 NULL */
 } proxy_response;
 
-/* "-P" 인자 "/api=127.0.0.1:8001,127.0.0.1:8002" 를 해석한다.
+/* "-P" 인자 "/api=127.0.0.1:8001,127.0.0.1:8002" 하나를 해석한다.
  * out 의 prefix, backends[].host/port/label, backend_count 를 채운다 (주소 해석은 하지 않음).
  * 반환: 0 성공, -1 실패 (err 에 이유) */
-int proxy_parse_spec(const char *spec, proxy_config *out, char *err, size_t err_cap);
+int proxy_parse_spec(const char *spec, proxy_route *out, char *err, size_t err_cap);
+
+/* -P 하나를 해석해서 proxy->routes 끝에 더한다. 그룹 수 초과, 같은 prefix 중복이면 실패.
+ * 반환: 0 성공, -1 실패 (err 에 이유) */
+int proxy_add_route(proxy_config *proxy, const char *spec, char *err, size_t err_cap);
+
+/* path 에 맞는 그룹 중 prefix 가 가장 긴 것의 번호. 없으면 -1 (proxy 가 NULL 이어도 -1).
+ * 예: "/api" 와 "/api/v2" 가 있으면 "/api/v2/x" → "/api/v2" 그룹 */
+int proxy_find_route(const proxy_config *proxy, const char *path);
 
 /* 백엔드가 이 서버 자신인가 (같은 포트 + 루프백 주소) → 요청이 끝없이 돌게 되므로 시작 때 거절 */
 bool proxy_is_self(const proxy_backend *backend, int own_port);

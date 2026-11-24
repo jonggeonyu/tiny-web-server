@@ -39,10 +39,12 @@ typedef struct {
     char reason_buf[96];
 } proxy_reply;
 
-/* 라운드로빈 번호표. 모든 일꾼 스레드가 함께 쓰는 값.
- * 자물쇠 없이 원자적 더하기(atomic_fetch_add)만으로 지킨다: 두 일꾼이 동시에 뽑아도 번호가 겹치지 않는다 */
-static atomic_uint g_next_ticket;
+/* 라운드로빈 번호표. 그룹마다 하나씩, 모든 일꾼 스레드가 함께 쓰는 값.
+ * 자물쇠 없이 원자적 더하기(atomic_fetch_add)만으로 지킨다: 두 일꾼이 동시에 뽑아도 번호가 겹치지 않는다.
+ * 그룹마다 따로 두는 이유: /img 요청이 /api 그룹의 순서를 흐트러뜨리지 않게 */
+static atomic_uint g_next_ticket[PROXY_MAX_ROUTES];
 
+static int resolve_backend(proxy_backend *backend, char *err, size_t err_cap);
 static size_t build_request_head(const request_ctx *ctx, const proxy_backend *backend,
                                  char *out, size_t cap);
 static proxy_error exchange(const proxy_backend *backend, const request_ctx *ctx,
@@ -68,11 +70,12 @@ static void set_note(http_writer *w, const proxy_backend *backend, const char *f
  * 공개: 헤더에 선언된 함수. 모양을 바꾸려면 팀과 먼저 정한다.
  * ------------------------------------------------------------------------- */
 
-void proxy_serve(const request_ctx *ctx, http_writer *w)
+void proxy_serve(const request_ctx *ctx, int route_index, http_writer *w)
 {
-    const proxy_config *proxy = &ctx->cfg->proxy;
+    const proxy_config *config = &ctx->cfg->proxy;
+    const proxy_route *proxy = &config->routes[route_index];
     const char *method = ctx->req->method;
-    unsigned int ticket = atomic_fetch_add(&g_next_ticket, 1u);
+    unsigned int ticket = atomic_fetch_add(&g_next_ticket[route_index], 1u);
     int tries = proxy->backend_count < PROXY_MAX_TRIES ? proxy->backend_count : PROXY_MAX_TRIES;
     proxy_error error = PROXY_ERR_CONNECT;
     const char *failed_label = NULL;
@@ -92,7 +95,7 @@ void proxy_serve(const request_ctx *ctx, http_writer *w)
 
         proxy_reply reply;
         memset(&reply, 0, sizeof(reply));
-        error = exchange(backend, ctx, head, head_length, proxy->response_timeout_ms, &reply);
+        error = exchange(backend, ctx, head, head_length, config->response_timeout_ms, &reply);
         if (error == PROXY_OK) {
             set_note(w, backend, failed_label);
             send_reply(w, &reply);
@@ -125,28 +128,13 @@ void proxy_serve(const request_ctx *ctx, http_writer *w)
 
 int proxy_resolve_backends(proxy_config *proxy, char *err, size_t err_cap)
 {
-    for (int i = 0; i < proxy->backend_count; i++) {
-        proxy_backend *backend = &proxy->backends[i];
-        char port[16];
-        snprintf(port, sizeof(port), "%d", backend->port);
-
-        struct addrinfo hints;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;     /* IPv4, IPv6 둘 다 */
-        hints.ai_socktype = SOCK_STREAM; /* TCP */
-        hints.ai_flags = AI_NUMERICSERV; /* 포트는 숫자 */
-
-        struct addrinfo *found = NULL;
-        int rc = getaddrinfo(backend->host, port, &hints, &found);
-        if (rc != 0 || found == NULL) {
-            snprintf(err, err_cap, "백엔드 주소를 찾을 수 없음: %s (%s)", backend->label,
-                     gai_strerror(rc));
-            return -1;
+    for (int r = 0; r < proxy->route_count; r++) {
+        proxy_route *route = &proxy->routes[r];
+        for (int i = 0; i < route->backend_count; i++) {
+            if (resolve_backend(&route->backends[i], err, err_cap) < 0) {
+                return -1;
+            }
         }
-        /* 여러 개가 나오면 첫 번째만 쓴다 (localhost → 127.0.0.1 등) */
-        memcpy(&backend->addr, found->ai_addr, found->ai_addrlen);
-        backend->addr_len = found->ai_addrlen;
-        freeaddrinfo(found);
     }
     return 0;
 }
@@ -154,6 +142,31 @@ int proxy_resolve_backends(proxy_config *proxy, char *err, size_t err_cap)
 /* ---------------------------------------------------------------------------
  * 도우미: 이 파일 안에서만 쓴다. 전부 static.
  * ------------------------------------------------------------------------- */
+
+static int resolve_backend(proxy_backend *backend, char *err, size_t err_cap)
+{
+    char port[16];
+    snprintf(port, sizeof(port), "%d", backend->port);
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;     /* IPv4, IPv6 둘 다 */
+    hints.ai_socktype = SOCK_STREAM; /* TCP */
+    hints.ai_flags = AI_NUMERICSERV; /* 포트는 숫자 */
+
+    struct addrinfo *found = NULL;
+    int rc = getaddrinfo(backend->host, port, &hints, &found);
+    if (rc != 0 || found == NULL) {
+        snprintf(err, err_cap, "백엔드 주소를 찾을 수 없음: %s (%s)", backend->label,
+                 gai_strerror(rc));
+        return -1;
+    }
+    /* 여러 개가 나오면 첫 번째만 쓴다 (localhost → 127.0.0.1 등) */
+    memcpy(&backend->addr, found->ai_addr, found->ai_addrlen);
+    backend->addr_len = found->ai_addrlen;
+    freeaddrinfo(found);
+    return 0;
+}
 
 static size_t build_request_head(const request_ctx *ctx, const proxy_backend *backend,
                                  char *out, size_t cap)

@@ -528,19 +528,28 @@ stop_server "$M_PID"
 section "리버스 프록시"
 # 백엔드 2개: 같은 서버 프로그램을 루트만 바꿔서 띄운다. 어느 쪽이 답했는지 who.txt 로 구별
 for b in b1 b2; do
-    mkdir -p "$WORK/$b/api"
+    mkdir -p "$WORK/$b/api/v2"
     echo "$b" > "$WORK/$b/api/who.txt"
+    echo "$b-v2" > "$WORK/$b/api/v2/who.txt"
     cp "$ROOT/big.bin" "$WORK/$b/api/big.bin"
 done
 start_server B1 -r "$WORK/b1" || exit 1
 start_server B2 -r "$WORK/b2" || exit 1
-start_server P -P "/api=127.0.0.1:$B1_PORT,127.0.0.1:$B2_PORT" || exit 1
+# 그룹 2개: /api → b1, b2 번갈아, /api/v2 → b2 만 (가장 긴 prefix 우선)
+start_server P -P "/api=127.0.0.1:$B1_PORT,127.0.0.1:$B2_PORT" -P "/api/v2=127.0.0.1:$B2_PORT" || exit 1
 UP=http://127.0.0.1:$P_PORT
 
 # ① 라운드로빈: 번갈아 답한다 (시작 확인 요청은 "/" 라서 프록시를 거치지 않음 → 번호표 0부터)
 RR=$(for i in 1 2 3 4; do $C "$UP/api/who.txt"; done | tr '\n' ' ')
 check "라운드로빈: b1 b2 b1 b2 순서" "b1 b2 b1 b2 " "$RR"
 check_has "접근 로그: 어느 백엔드가 처리했는지" "프록시 → 127.0.0.1:$B2_PORT" "$(cat "$P_LOG")"
+check_has "시작 로그에 그룹 2개" "리버스 프록시: /api/v2 → 127.0.0.1:$B2_PORT" "$(cat "$P_LOG")"
+# 6번 요청 → 3:3 (F14 검증 방법 그대로)
+SIX=$(for i in 1 2 3 4 5 6; do $C "$UP/api/who.txt"; done | sort | uniq -c | awk '{print $2 ":" $1}' | tr '\n' ' ')
+check "6번 요청 → b1 3번, b2 3번" "b1:3 b2:3 " "$SIX"
+# 가장 긴 prefix 우선 + 그룹마다 따로 세는 라운드로빈: 사이에 /api/v2 요청이 끼어도 /api 순서는 그대로
+MIX=$(for p in api api/v2 api api/v2 api api; do $C "$UP/$p/who.txt"; done | tr '\n' ' ')
+check "/api/v2 는 항상 b2, 끼어들어도 /api 는 b1 b2 b1 b2" "b1 b2-v2 b2 b2-v2 b1 b2 " "$MIX"
 
 # ② prefix 밖은 프록시 자신이 처리
 check "prefix 밖(/hello.txt)은 자기 파일" same "$($C "$UP/hello.txt" | cmp -s - "$ROOT/hello.txt" && echo same)"
@@ -622,6 +631,8 @@ check "그래도 prefix 밖은 계속 200" 200 "$(status "$UP/hello.txt")"
 check "백엔드가 자기 자신이면 시작 거부 (종료 코드 1)" 1 \
     "$("$E2E_BIN" -p 18999 -r "$ROOT" -P /api=127.0.0.1:18999 > /dev/null 2>&1; echo $?)"
 check "형식이 틀린 -P 는 시작 거부" 1 "$("$E2E_BIN" -p 18998 -r "$ROOT" -P api > /dev/null 2>&1; echo $?)"
+check "같은 prefix 를 두 번 쓰면 시작 거부" 1 \
+    "$("$E2E_BIN" -p 18998 -r "$ROOT" -P /api=127.0.0.1:1 -P /api/=127.0.0.1:2 > /dev/null 2>&1; echo $?)"
 check_has "거부 이유를 알려 줌" "이 서버 자신" "$("$E2E_BIN" -p 18999 -r "$ROOT" -P /api=127.0.0.1:18999 2>&1)"
 
 # ================================================================== 메모리 검사 집계

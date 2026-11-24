@@ -193,7 +193,7 @@ static void handle_request(int fd, const http_request *req, const char *buf, siz
         return;
     }
 
-    route rt = router_match(req->method, path, cfg->proxy.prefix);
+    route rt = router_match(req->method, path, &cfg->proxy);
     http_body body = {NULL, 0};
 
     if (rt.wants_body) {

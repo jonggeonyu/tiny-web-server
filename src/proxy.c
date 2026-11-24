@@ -28,7 +28,7 @@ static int read_framing_headers(proxy_response *response);
  * 공개: 헤더에 선언된 함수. 모양을 바꾸려면 팀과 먼저 정한다.
  * ------------------------------------------------------------------------- */
 
-int proxy_parse_spec(const char *spec, proxy_config *out, char *err, size_t err_cap)
+int proxy_parse_spec(const char *spec, proxy_route *out, char *err, size_t err_cap)
 {
     const char *equal = strchr(spec, '=');
     if (equal == NULL) {
@@ -72,6 +72,45 @@ int proxy_parse_spec(const char *spec, proxy_config *out, char *err, size_t err_
         cursor += length + 1;
     }
     return 0;
+}
+
+int proxy_add_route(proxy_config *proxy, const char *spec, char *err, size_t err_cap)
+{
+    if (proxy->route_count >= PROXY_MAX_ROUTES) {
+        snprintf(err, err_cap, "프록시 그룹(-P)은 최대 %d개", PROXY_MAX_ROUTES);
+        return -1;
+    }
+    proxy_route *route = &proxy->routes[proxy->route_count];
+    if (proxy_parse_spec(spec, route, err, err_cap) < 0) {
+        return -1;
+    }
+    for (int i = 0; i < proxy->route_count; i++) {
+        if (strcmp(proxy->routes[i].prefix, route->prefix) == 0) {
+            snprintf(err, err_cap, "같은 경로 prefix 가 두 번 나옴: %s", route->prefix);
+            return -1;
+        }
+    }
+    proxy->route_count++;
+    return 0;
+}
+
+int proxy_find_route(const proxy_config *proxy, const char *path)
+{
+    if (proxy == NULL) {
+        return -1;
+    }
+    int best = -1;
+    size_t best_length = 0;
+    for (int i = 0; i < proxy->route_count; i++) {
+        const char *prefix = proxy->routes[i].prefix;
+        size_t length = strlen(prefix);
+        /* 가장 긴 prefix 우선: "/" (길이 1) 은 다른 규칙이 하나도 안 맞을 때만 고른다 */
+        if (proxy_is_match(prefix, path) && (best < 0 || length > best_length)) {
+            best = i;
+            best_length = length;
+        }
+    }
+    return best;
 }
 
 bool proxy_is_self(const proxy_backend *backend, int own_port)

@@ -69,8 +69,9 @@ _Static_assert(3 + 1 + 4 + MAX_QUEUE + MAX_THREADS * 5 + LINGER_MAX + KEEPALIVE_
                    CHILD_CLOSE_FD_MAX,
                "동시에 열릴 수 있는 fd 수가 CHILD_CLOSE_FD_MAX 를 넘음");
 
-/* 리버스 프록시 (-P /api=127.0.0.1:8001,127.0.0.1:8002) */
-#define PROXY_MAX_BACKENDS 8      /* 백엔드 최대 개수 (고정 배열) */
+/* 리버스 프록시 (-P /api=127.0.0.1:8001,127.0.0.1:8002, 여러 번 쓰면 그룹 여러 개) */
+#define PROXY_MAX_ROUTES 8        /* 프록시 그룹(-P) 최대 개수 */
+#define PROXY_MAX_BACKENDS 8      /* 그룹 하나의 백엔드 최대 개수 (고정 배열) */
 #define PROXY_MAX_TRIES 2         /* 요청 하나당 시도할 백엔드 수 (처음 + 재시도 1번) */
 #define PROXY_PREFIX_MAX 256      /* 프록시 경로 prefix 최대 길이 */
 #define PROXY_HOST_MAX 256        /* 백엔드 호스트 이름 최대 길이 */
@@ -90,11 +91,17 @@ typedef struct {
     socklen_t addr_len;
 } proxy_backend;
 
-/* 프록시 설정. prefix 가 빈 문자열이면 프록시 끔 */
+/* 프록시 그룹 하나 (-P 하나): 이 prefix 로 시작하는 요청을 backends 에 번갈아 보낸다 */
 typedef struct {
-    char prefix[PROXY_PREFIX_MAX];    /* "/api" (끝에 '/' 없음). "/" 이면 모든 요청을 프록시 */
+    char prefix[PROXY_PREFIX_MAX];    /* "/api" (끝에 '/' 없음). "/" 이면 모든 요청 */
     proxy_backend backends[PROXY_MAX_BACKENDS];
     int backend_count;
+} proxy_route;
+
+/* 프록시 설정. route_count 가 0 이면 프록시 끔 */
+typedef struct {
+    proxy_route routes[PROXY_MAX_ROUTES];
+    int route_count;
     int response_timeout_ms;
 } proxy_config;
 
@@ -112,7 +119,7 @@ typedef struct {
     int threads;              /* 일꾼 스레드 수 */
     int queue_size;           /* 대기열 칸 수 (가득 차면 503) */
     int shutdown_timeout_s;   /* 안전한 종료의 강제 시한 (초). 0 = 시한 없음 */
-    proxy_config proxy;       /* 리버스 프록시 (-P). prefix 가 비어 있으면 끔 */
+    proxy_config proxy;       /* 리버스 프록시 (-P). route_count 가 0 이면 끔 */
 } server_config;
 
 #endif /* CONFIG_H */

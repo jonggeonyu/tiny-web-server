@@ -6,6 +6,7 @@
 
 #include "proxy.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* 요청 문자열을 해석해서 req 에 채운다 (테스트 준비용) */
@@ -17,7 +18,7 @@ static void parse(const char *raw, http_request *req)
 
 static void test_f15_parse_spec(void)
 {
-    proxy_config pc;
+    proxy_route pc;
     char err[256];
 
     CHECK_EQ_INT(proxy_parse_spec("/api=127.0.0.1:8001,127.0.0.1:8002", &pc, err, sizeof(err)), 0);
@@ -54,6 +55,48 @@ static void test_f15_parse_spec(void)
     CHECK_EQ_INT(proxy_parse_spec("/api=a:1,a:2,a:3,a:4,a:5,a:6,a:7,a:8", &pc, err,
                                   sizeof(err)), 0);
     CHECK_EQ_INT(pc.backend_count, 8);
+}
+
+static void test_f13_add_and_find_route(void)
+{
+    static proxy_config pc;
+    char err[256];
+    memset(&pc, 0, sizeof(pc));
+    CHECK_EQ_INT(proxy_find_route(&pc, "/api"), -1);   /* 그룹 없음 */
+    CHECK_EQ_INT(proxy_find_route(NULL, "/api"), -1);
+
+    CHECK_EQ_INT(proxy_add_route(&pc, "/api=a:1,b:2", err, sizeof(err)), 0);
+    CHECK_EQ_INT(proxy_add_route(&pc, "/api/v2=c:3", err, sizeof(err)), 0);
+    CHECK_EQ_INT(proxy_add_route(&pc, "/=d:4", err, sizeof(err)), 0);
+    CHECK_EQ_INT(pc.route_count, 3);
+
+    /* 가장 긴 prefix 우선, "/" 는 나머지 전부 */
+    CHECK_EQ_INT(proxy_find_route(&pc, "/api/users"), 0);
+    CHECK_EQ_INT(proxy_find_route(&pc, "/api/v2/users"), 1);
+    CHECK_EQ_INT(proxy_find_route(&pc, "/api/v2"), 1);
+    CHECK_EQ_INT(proxy_find_route(&pc, "/api/v22"), 0);
+    CHECK_EQ_INT(proxy_find_route(&pc, "/index.html"), 2);
+
+    /* 순서를 바꿔 넣어도 결과는 같다 (먼저 넣은 게 아니라 긴 게 이김) */
+    static proxy_config reversed;
+    memset(&reversed, 0, sizeof(reversed));
+    proxy_add_route(&reversed, "/=d:4", err, sizeof(err));
+    proxy_add_route(&reversed, "/api/v2=c:3", err, sizeof(err));
+    proxy_add_route(&reversed, "/api=a:1", err, sizeof(err));
+    CHECK_EQ_INT(proxy_find_route(&reversed, "/api/v2/x"), 1);
+    CHECK_EQ_INT(proxy_find_route(&reversed, "/api/x"), 2);
+    CHECK_EQ_INT(proxy_find_route(&reversed, "/x"), 0);
+
+    /* 같은 prefix 두 번, 잘못된 규칙, 그룹 수 초과는 거절 */
+    CHECK_EQ_INT(proxy_add_route(&pc, "/api/=e:5", err, sizeof(err)), -1); /* "/api/" = "/api" */
+    CHECK_EQ_INT(proxy_add_route(&pc, "nope", err, sizeof(err)), -1);
+    CHECK_EQ_INT(pc.route_count, 3);
+    for (int i = pc.route_count; i < PROXY_MAX_ROUTES; i++) {
+        char spec[32];
+        snprintf(spec, sizeof(spec), "/g%d=h:1", i);
+        CHECK_EQ_INT(proxy_add_route(&pc, spec, err, sizeof(err)), 0);
+    }
+    CHECK_EQ_INT(proxy_add_route(&pc, "/one-more=h:1", err, sizeof(err)), -1);
 }
 
 static void test_f15_is_self(void)
@@ -280,6 +323,7 @@ static void test_f15_response_body_rules(void)
 int main(void)
 {
     RUN_TEST(test_f15_parse_spec);
+    RUN_TEST(test_f13_add_and_find_route);
     RUN_TEST(test_f15_is_self);
     RUN_TEST(test_f15_prefix_match);
     RUN_TEST(test_f15_round_robin);
