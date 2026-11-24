@@ -524,6 +524,106 @@ SIGBLK=$($C "http://127.0.0.1:$M_PORT/cgi-bin/sigmask.sh" | awk '/SigBlk/{print 
 check "CGI 의 막힌 시그널 없음 (SigBlk)" 0000000000000000 "$SIGBLK"
 stop_server "$M_PID"
 
+# ================================================================== 리버스 프록시 (F15)
+section "리버스 프록시"
+# 백엔드 2개: 같은 서버 프로그램을 루트만 바꿔서 띄운다. 어느 쪽이 답했는지 who.txt 로 구별
+for b in b1 b2; do
+    mkdir -p "$WORK/$b/api"
+    echo "$b" > "$WORK/$b/api/who.txt"
+    cp "$ROOT/big.bin" "$WORK/$b/api/big.bin"
+done
+start_server B1 -r "$WORK/b1" || exit 1
+start_server B2 -r "$WORK/b2" || exit 1
+start_server P -P "/api=127.0.0.1:$B1_PORT,127.0.0.1:$B2_PORT" || exit 1
+UP=http://127.0.0.1:$P_PORT
+
+# ① 라운드로빈: 번갈아 답한다 (시작 확인 요청은 "/" 라서 프록시를 거치지 않음 → 번호표 0부터)
+RR=$(for i in 1 2 3 4; do $C "$UP/api/who.txt"; done | tr '\n' ' ')
+check "라운드로빈: b1 b2 b1 b2 순서" "b1 b2 b1 b2 " "$RR"
+check_has "접근 로그: 어느 백엔드가 처리했는지" "프록시 → 127.0.0.1:$B2_PORT" "$(cat "$P_LOG")"
+
+# ② prefix 밖은 프록시 자신이 처리
+check "prefix 밖(/hello.txt)은 자기 파일" same "$($C "$UP/hello.txt" | cmp -s - "$ROOT/hello.txt" && echo same)"
+check "이름만 비슷한 /apix 는 프록시 안 함 → 404" 404 "$(status "$UP/apix")"
+
+# ③ 응답 전달: 헤더 중복 없음, HEAD, 큰 파일, 백엔드의 에러 상태 그대로
+PH=$($C -i "$UP/api/who.txt" | tr -d '\r')
+check "Server 헤더는 하나만" 1 "$(printf '%s\n' "$PH" | grep -c '^Server:')"
+check "Content-Length 헤더는 하나만" 1 "$(printf '%s\n' "$PH" | grep -c '^Content-Length:')"
+check_has "백엔드의 Last-Modified 는 전달" "Last-Modified:" "$PH"
+check "HEAD: Content-Length 는 GET 과 같음" 3 "$($C -I "$UP/api/who.txt" | tr -d '\r' | awk -F': ' '/^Content-Length/{print $2}')"
+check "HEAD: 본문 없음" 0 "$($C -I -o /dev/null -w '%{size_download}' "$UP/api/who.txt")"
+check "3MB 파일 내용이 같음 (프록시 경유)" same "$($C "$UP/api/big.bin" | cmp -s - "$ROOT/big.bin" && echo same)"
+check "백엔드의 404 는 그대로 404" 404 "$(status "$UP/api/nope.txt")"
+# 두 번째 요청의 num_connects 가 0 = 새로 연결하지 않고 앞 연결을 재사용
+check "프록시 경유 keep-alive: 두 번째 요청은 새 연결 없음" 0 \
+    "$($C -o /dev/null -o /dev/null -w '%{num_connects}\n' "$UP/api/who.txt" "$UP/api/who.txt" | tail -1)"
+
+# ④ 모든 요청을 프록시("/"): POST 본문, X-Forwarded-For, hop-by-hop 헤더 제거를 CGI 로 확인
+start_server PA -P "/=127.0.0.1:$B1_PORT" || exit 1
+UPA=http://127.0.0.1:$PA_PORT
+check "POST 1MB 본문이 그대로 전달" same \
+    "$($C --data-binary @"$WORK/body1m.bin" "$UPA/cgi-bin/echo_post.sh" | cmp -s - "$WORK/body1m.bin" && echo same)"
+PENV=$($C -H 'Connection: keep-alive, X-Hop' -H 'X-Hop: secret' -H 'X-Keep: yes' "$UPA/cgi-bin/env.sh")
+check_has "백엔드가 X-Forwarded-For 를 받음" "HTTP_X_FORWARDED_FOR=127.0.0.1" "$PENV"
+check_has "일반 헤더는 전달" "HTTP_X_KEEP=yes" "$PENV"
+check "Connection 에 적힌 헤더(X-Hop)는 전달 안 함" "" "$(printf '%s\n' "$PENV" | grep '^HTTP_X_HOP=')"
+check_has "백엔드에는 HTTP/1.0 + Connection: close 로" "SERVER_PROTOCOL=HTTP/1.0" "$PENV"
+
+# ⑤ 보낸 뒤 끊김: GET 은 다음 백엔드로 재시도, POST 는 재시도 안 함 (멱등성)
+CL_PORT=$(free_port)
+python3 -I "$REPO/tests/fake_backend.py" close "$CL_PORT" "$WORK/closer.log" &
+SRV_PIDS+=("$!")
+for ((i = 0; i < 50; i++)); do [ -f "$WORK/closer.log" ] && break; sleep 0.1; done
+start_server PC -P "/=127.0.0.1:$CL_PORT,127.0.0.1:$B2_PORT" || exit 1
+UPC=http://127.0.0.1:$PC_PORT
+# 백엔드가 둘이라 연속 두 요청 중 하나는 반드시 끊는 백엔드가 먼저 걸린다 (어느 쪽인지는 번호표에 따라)
+G1=$(status "$UPC/api/who.txt")
+G2=$(status "$UPC/api/who.txt")
+check "GET 2번: 끊는 백엔드에 걸려도 다음 백엔드로 재시도해서 둘 다 200" "200 200" "$G1 $G2"
+check_has "로그: 끊김 → 다음 백엔드로 재시도" "응답 없이 연결이 끊김 → 다음 백엔드로 재시도" "$(cat "$PC_LOG")"
+P1=$(status -X POST --data 'order=1' "$UPC/cgi-bin/echo_post.sh")
+P2=$(status -X POST --data 'order=2' "$UPC/cgi-bin/echo_post.sh")
+check "POST 2번: 끊는 백엔드에 걸린 쪽은 재시도 없이 502" "200 502" "$(printf '%s\n' "$P1" "$P2" | sort | tr '\n' ' ' | sed 's/ $//')"
+check "끊는 백엔드가 받은 POST 는 1번" 1 "$(grep -c '^POST' "$WORK/closer.log")"
+check_has "로그: 멱등 아님 → 재시도 안 함" "멱등 아님 → 재시도 안 함" "$(cat "$PC_LOG")"
+
+# ⑥ 응답 시간 초과 → 504 (재시도 없이, -W 초 뒤)
+HG_PORT=$(free_port)
+python3 -I "$REPO/tests/fake_backend.py" hang "$HG_PORT" "$WORK/hang.log" &
+SRV_PIDS+=("$!")
+for ((i = 0; i < 50; i++)); do [ -f "$WORK/hang.log" ] && break; sleep 0.1; done
+start_server PH -W 1 -P "/api=127.0.0.1:$HG_PORT,127.0.0.1:$B1_PORT" || exit 1
+t0=$(date +%s%N)
+check "답 없는 백엔드 → 504" 504 "$(status "http://127.0.0.1:$PH_PORT/api/who.txt")"
+took=$(( ($(date +%s%N) - t0) / 1000000 ))
+check_time "-W 1 초 뒤에 504 (재시도로 2배가 되지 않음) (ms)" 1900 "$took"
+check_lt "시한보다 일찍 끝나지는 않음 (ms)" "$took" 900
+
+# ⑦ 프록시 안전 종료: 백엔드에서 처리 중인 요청(2초 CGI)은 끝까지 전달한 뒤 끝난다
+$C -o "$WORK/p_inflight.out" "$UPA/cgi-bin/slow.sh" &
+PP=$!
+sleep 0.5
+stop_server "$PA_PID" TERM
+wait "$PP"
+check_has "종료 중에도 처리 중이던 프록시 요청은 끝까지 응답" "slow done" "$(cat "$WORK/p_inflight.out")"
+check "프록시 정상 종료 (종료 코드 0)" 0 "$STOP_RC"
+
+# ⑧ 백엔드 장애: 하나 죽이면 살아 있는 쪽으로, 둘 다 죽으면 502
+stop_server "$B2_PID"
+FO=$(for i in 1 2 3 4; do $C "$UP/api/who.txt"; done | tr '\n' ' ')
+check "b2 를 끄면 모든 요청을 b1 이 처리" "b1 b1 b1 b1 " "$FO"
+check_has "로그: 연결 실패 → 재시도" "다음 백엔드로 재시도" "$(cat "$P_LOG")"
+stop_server "$B1_PID"
+check "백엔드가 모두 꺼지면 502" 502 "$(status "$UP/api/who.txt")"
+check "그래도 prefix 밖은 계속 200" 200 "$(status "$UP/hello.txt")"
+
+# ⑨ 잘못된 -P 는 시작하지 않는다
+check "백엔드가 자기 자신이면 시작 거부 (종료 코드 1)" 1 \
+    "$("$E2E_BIN" -p 18999 -r "$ROOT" -P /api=127.0.0.1:18999 > /dev/null 2>&1; echo $?)"
+check "형식이 틀린 -P 는 시작 거부" 1 "$("$E2E_BIN" -p 18998 -r "$ROOT" -P api > /dev/null 2>&1; echo $?)"
+check_has "거부 이유를 알려 줌" "이 서버 자신" "$("$E2E_BIN" -p 18999 -r "$ROOT" -P /api=127.0.0.1:18999 2>&1)"
+
 # ================================================================== 메모리 검사 집계
 section "메모리 검사"
 # (1) ASan/LSan/UBSan/TSan 보고: 어떤 빌드든 서버 로그에 나오면 안 된다
