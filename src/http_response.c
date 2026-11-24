@@ -8,7 +8,22 @@ const char *http_status_text(int status)
 {
     switch (status) {
     case 200: return "OK";
+    /* 아래 상태들은 우리 서버는 직접 안 쓰지만, 프록시가 백엔드 응답을 그대로 전달할 때 필요하다 */
+    case 201: return "Created";
+    case 202: return "Accepted";
+    case 204: return "No Content";
+    case 206: return "Partial Content";
     case 301: return "Moved Permanently";
+    case 302: return "Found";
+    case 303: return "See Other";
+    case 304: return "Not Modified";
+    case 307: return "Temporary Redirect";
+    case 308: return "Permanent Redirect";
+    case 401: return "Unauthorized";
+    case 409: return "Conflict";
+    case 410: return "Gone";
+    case 415: return "Unsupported Media Type";
+    case 429: return "Too Many Requests";
     case 400: return "Bad Request";
     case 403: return "Forbidden";
     case 404: return "Not Found";
@@ -20,9 +35,9 @@ const char *http_status_text(int status)
     case 431: return "Request Header Fields Too Large";
     case 500: return "Internal Server Error";
     case 501: return "Not Implemented";
-    case 502: return "Bad Gateway";          /* 2단계 프록시용 */
+    case 502: return "Bad Gateway";          /* 프록시: 백엔드에 닿지 못함 / 잘못된 응답 */
     case 503: return "Service Unavailable";
-    case 504: return "Gateway Timeout";      /* 2단계 프록시용 */
+    case 504: return "Gateway Timeout";      /* 프록시: 백엔드가 제시간에 답하지 않음 */
     case 505: return "HTTP Version Not Supported";
     default:  return "Unknown";
     }

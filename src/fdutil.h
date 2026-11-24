@@ -15,6 +15,9 @@
 /* accept + FD_CLOEXEC. 반환은 accept 와 같음 */
 int fd_accept_cloexec(int listen_fd, struct sockaddr *addr, socklen_t *len);
 
+/* socket + FD_CLOEXEC (프록시가 백엔드에 연결할 때). 반환은 socket 과 같음 */
+int fd_socket_cloexec(int domain, int type, int protocol);
+
 /* pipe + 양쪽 FD_CLOEXEC. 반환은 pipe 와 같음 */
 int fd_pipe_cloexec(int fds[2]);
 

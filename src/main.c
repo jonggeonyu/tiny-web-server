@@ -2,8 +2,11 @@
  * tiny-web-server 진입점: 명령줄 인자 해석, 시그널 설정, 서버 시작.
  *
  *   ./build/tiny -p 8080 -r ./www -c ./cgi-bin [-t 일꾼수] [-q 대기열] [-T 유휴시간(초)] [-S 종료시한(초)]
+ *                [-P /경로=호스트:포트,호스트:포트] [-W 프록시 응답 대기(초)]
  */
 #include "config.h"
+#include "handler_proxy.h"
+#include "proxy.h"
 #include "server.h"
 
 #include <errno.h>
@@ -20,7 +23,8 @@
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트] [-c CGI디렉토리] [-t 일꾼수] [-q 대기열] [-T 초] [-S 초]\n",
+    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트] [-c CGI디렉토리] [-t 일꾼수] [-q 대기열] [-T 초] [-S 초]"
+                    " [-P 경로=백엔드,...] [-W 초]\n",
             prog);
     fprintf(stderr, "  -p 포트   듣는 포트 번호 (1~65535, 기본값 %d)\n", DEFAULT_PORT);
     fprintf(stderr, "  -r 루트   정적 파일 루트 디렉토리 (기본값 %s)\n", DEFAULT_ROOT);
@@ -32,6 +36,30 @@ static void usage(const char *prog)
             DEFAULT_IDLE_TIMEOUT_MS / 1000);
     fprintf(stderr, "  -S 초     종료 신호 뒤 처리 중인 요청을 기다리는 최대 시간, 0 = 무제한 (기본값 %d)\n",
             DEFAULT_SHUTDOWN_TIMEOUT_S);
+    fprintf(stderr, "  -P 규칙   리버스 프록시: 경로가 이 prefix 로 시작하면 백엔드들에 번갈아 전달 (최대 %d개)\n"
+                    "            예: -P /api=127.0.0.1:8001,127.0.0.1:8002   (/ 로 쓰면 모든 요청)\n",
+            PROXY_MAX_BACKENDS);
+    fprintf(stderr, "  -W 초     프록시가 백엔드 응답을 기다리는 최대 시간. 넘으면 504 (기본값 %d)\n",
+            DEFAULT_PROXY_RESPONSE_TIMEOUT_MS / 1000);
+}
+
+/* -P 인자 해석 + 백엔드 주소 해석 + 자기 자신을 가리키는지 검사 (자기 자신이면 요청이 끝없이 돈다) */
+static int setup_proxy(const char *spec, server_config *cfg)
+{
+    char err[512];
+    if (proxy_parse_spec(spec, &cfg->proxy, err, sizeof(err)) < 0 ||
+        proxy_resolve_backends(&cfg->proxy, err, sizeof(err)) < 0) {
+        fprintf(stderr, "잘못된 프록시 설정 -P %s: %s\n", spec, err);
+        return -1;
+    }
+    for (int i = 0; i < cfg->proxy.backend_count; i++) {
+        if (proxy_is_self(&cfg->proxy.backends[i], cfg->port)) {
+            fprintf(stderr, "잘못된 프록시 설정: 백엔드 %s 가 이 서버 자신임 (요청이 끝없이 돎)\n",
+                    cfg->proxy.backends[i].label);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 /* 문자열을 포트 번호로 변환. 숫자가 아니거나 범위를 벗어나면 -1 */
@@ -91,11 +119,13 @@ int main(int argc, char **argv)
     cfg.threads = default_threads();
     cfg.queue_size = 0; /* 0 = 일꾼 수에 맞춰 아래에서 계산 */
     cfg.shutdown_timeout_s = DEFAULT_SHUTDOWN_TIMEOUT_S;
+    cfg.proxy.response_timeout_ms = DEFAULT_PROXY_RESPONSE_TIMEOUT_MS;
+    const char *proxy_arg = NULL; /* 포트를 다 읽은 뒤에 검사해야 하므로(자기 자신 검사) 나중에 해석 */
     const char *root_arg = DEFAULT_ROOT;
     const char *cgi_arg = DEFAULT_CGI_DIR;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:r:c:t:q:T:S:h")) != -1) {
+    while ((opt = getopt(argc, argv, "p:r:c:t:q:T:S:P:W:h")) != -1) {
         switch (opt) {
         case 'p':
             cfg.port = parse_port(optarg);
@@ -145,6 +175,18 @@ int main(int argc, char **argv)
             cfg.shutdown_timeout_s = (int)sec;
             break;
         }
+        case 'P':
+            proxy_arg = optarg;
+            break;
+        case 'W': {
+            int sec = parse_port(optarg); /* 1 이상 정수 검사를 재사용 */
+            if (sec < 0 || sec > 3600) {
+                fprintf(stderr, "잘못된 프록시 응답 대기 시간(초): %s (1~3600)\n", optarg);
+                return 1;
+            }
+            cfg.proxy.response_timeout_ms = sec * 1000;
+            break;
+        }
         case 'h':
             usage(argv[0]);
             return 0;
@@ -162,6 +204,8 @@ int main(int argc, char **argv)
             cfg.queue_size = MAX_QUEUE;
     }
 
+    if (proxy_arg != NULL && setup_proxy(proxy_arg, &cfg) < 0)
+        return 1;
     if (resolve_root(root_arg, cfg.root) < 0)
         return 1;
     /* CGI 디렉토리는 없어도 서버는 뜬다 (CGI 요청만 404) */
@@ -189,6 +233,12 @@ int main(int argc, char **argv)
            cfg.cgi_dir[0] ? cfg.cgi_dir : "(꺼짐)");
     printf("  일꾼 %d개, 대기열 %d칸, keep-alive 유휴 %d초 / 연결당 최대 %d요청  (종료: Ctrl+C)\n",
            cfg.threads, cfg.queue_size, cfg.keepalive_timeout_ms / 1000, cfg.max_requests);
+    if (cfg.proxy.backend_count > 0) {
+        printf("  리버스 프록시: %s →", cfg.proxy.prefix);
+        for (int i = 0; i < cfg.proxy.backend_count; i++)
+            printf(" %s", cfg.proxy.backends[i].label);
+        printf("  (라운드로빈, 응답 대기 %d초)\n", cfg.proxy.response_timeout_ms / 1000);
+    }
     fflush(stdout);
 
     /* 종료 신호를 받아 정리를 마치면 돌아온다 (listen_fd 도 닫힘). 시작 준비에 실패하면 -1 */

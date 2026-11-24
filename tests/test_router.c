@@ -7,48 +7,64 @@
 
 static void test_echo_route(void)
 {
-    route r = router_match("POST", "/echo");
+    route r = router_match("POST", "/echo", "");
     CHECK_EQ_INT(r.kind, ROUTE_ECHO);
     CHECK_EQ_INT(r.wants_body, 1);
 
-    r = router_match("GET", "/echo"); /* 405 를 낼 것이므로 본문을 읽을 필요 없음 */
+    r = router_match("GET", "/echo", ""); /* 405 를 낼 것이므로 본문을 읽을 필요 없음 */
     CHECK_EQ_INT(r.kind, ROUTE_ECHO);
     CHECK_EQ_INT(r.wants_body, 0);
 }
 
 static void test_static_route(void)
 {
-    route r = router_match("GET", "/");
+    route r = router_match("GET", "/", "");
     CHECK_EQ_INT(r.kind, ROUTE_STATIC);
     CHECK_EQ_INT(r.wants_body, 0);
 
-    r = router_match("POST", "/index.html"); /* 정적 파일은 POST 본문을 쓰지 않음 */
+    r = router_match("POST", "/index.html", ""); /* 정적 파일은 POST 본문을 쓰지 않음 */
     CHECK_EQ_INT(r.kind, ROUTE_STATIC);
     CHECK_EQ_INT(r.wants_body, 0);
 
     /* 정확히 "/echo" 만 echo */
-    CHECK_EQ_INT(router_match("POST", "/echo/").kind, ROUTE_STATIC);
-    CHECK_EQ_INT(router_match("POST", "/echoes").kind, ROUTE_STATIC);
-    CHECK_EQ_INT(router_match("POST", "/a/echo").kind, ROUTE_STATIC);
+    CHECK_EQ_INT(router_match("POST", "/echo/", "").kind, ROUTE_STATIC);
+    CHECK_EQ_INT(router_match("POST", "/echoes", "").kind, ROUTE_STATIC);
+    CHECK_EQ_INT(router_match("POST", "/a/echo", "").kind, ROUTE_STATIC);
 }
 
 static void test_cgi_route(void)
 {
-    route r = router_match("GET", "/cgi-bin/hello.sh");
+    route r = router_match("GET", "/cgi-bin/hello.sh", "");
     CHECK_EQ_INT(r.kind, ROUTE_CGI);
     CHECK_EQ_INT(r.wants_body, 0);
-    r = router_match("POST", "/cgi-bin/echo_post.sh");
+    r = router_match("POST", "/cgi-bin/echo_post.sh", "");
     CHECK_EQ_INT(r.kind, ROUTE_CGI);
     CHECK_EQ_INT(r.wants_body, 1); /* POST 본문은 CGI 표준 입력으로 */
-    CHECK_EQ_INT(router_match("GET", "/cgi-bin/x/extra/path").kind, ROUTE_CGI);
-    CHECK_EQ_INT(router_match("GET", "/cgi-bin").kind, ROUTE_CGI);
-    CHECK_EQ_INT(router_match("GET", "/cgi-bin/").kind, ROUTE_CGI);
-    CHECK_EQ_INT(router_match("GET", "/cgi-binx/a").kind, ROUTE_STATIC); /* 이름만 비슷 */
-    CHECK_EQ_INT(router_match("GET", "/a/cgi-bin/x").kind, ROUTE_STATIC);
+    CHECK_EQ_INT(router_match("GET", "/cgi-bin/x/extra/path", "").kind, ROUTE_CGI);
+    CHECK_EQ_INT(router_match("GET", "/cgi-bin", "").kind, ROUTE_CGI);
+    CHECK_EQ_INT(router_match("GET", "/cgi-bin/", "").kind, ROUTE_CGI);
+    CHECK_EQ_INT(router_match("GET", "/cgi-binx/a", "").kind, ROUTE_STATIC); /* 이름만 비슷 */
+    CHECK_EQ_INT(router_match("GET", "/a/cgi-bin/x", "").kind, ROUTE_STATIC);
+}
+
+static void test_f15_proxy_route(void)
+{
+    route r = router_match("GET", "/api/users", "/api");
+    CHECK_EQ_INT(r.kind, ROUTE_PROXY);
+    CHECK_EQ_INT(r.wants_body, 1); /* 본문이 있으면 백엔드로 넘긴다 */
+    CHECK_EQ_INT(router_match("POST", "/api", "/api").kind, ROUTE_PROXY);
+    CHECK_EQ_INT(router_match("GET", "/apix", "/api").kind, ROUTE_STATIC);
+    CHECK_EQ_INT(router_match("GET", "/cgi-bin/hello.sh", "/api").kind, ROUTE_CGI);
+    /* "/" = 전부 프록시 (CGI, echo 보다 먼저) */
+    CHECK_EQ_INT(router_match("GET", "/cgi-bin/hello.sh", "/").kind, ROUTE_PROXY);
+    CHECK_EQ_INT(router_match("POST", "/echo", "/").kind, ROUTE_PROXY);
+    /* 프록시 꺼짐 */
+    CHECK_EQ_INT(router_match("GET", "/api/users", "").kind, ROUTE_STATIC);
 }
 
 int main(void)
 {
+    RUN_TEST(test_f15_proxy_route);
     RUN_TEST(test_cgi_route);
     RUN_TEST(test_echo_route);
     RUN_TEST(test_static_route);

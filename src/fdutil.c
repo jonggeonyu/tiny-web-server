@@ -40,6 +40,22 @@ int fd_accept_cloexec(int listen_fd, struct sockaddr *addr, socklen_t *len)
 #endif
 }
 
+int fd_socket_cloexec(int domain, int type, int protocol)
+{
+#if defined(__linux__)
+    return socket(domain, type | SOCK_CLOEXEC, protocol);
+#else
+    int fd = socket(domain, type, protocol);
+    if (fd >= 0 && set_cloexec(fd) < 0) {
+        int err = errno;
+        close(fd);
+        errno = err;
+        return -1;
+    }
+    return fd;
+#endif
+}
+
 int fd_pipe_cloexec(int fds[2])
 {
 #if defined(__linux__)
