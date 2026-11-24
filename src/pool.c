@@ -4,20 +4,24 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <time.h>
 
 /* 공개 함수가 필드를 쓰므로 구조체를 맨 위에 둔다. 헤더에는 이름만 있다.
  * 여러 스레드가 같이 쓰는 값에는 지키는 락을 적었다. */
 struct WorkerPool {
     pthread_mutex_t lock;
     pthread_cond_t not_empty;   /* 큐에 연결이 생겼거나 종료하라는 신호 */
+    pthread_cond_t all_exited;  /* 마지막 일꾼이 끝났다는 신호 (MONOTONIC) */
     bool is_lock_ready;         /* 만들 때만 쓴다. 실패한 락은 destroy 금지 */
-    bool is_cond_ready;
+    bool is_not_empty_ready;
+    bool is_all_exited_ready;
 
     int *queue;                 /* lock: 원형 큐. queue[head]가 다음 차례 */
     size_t capacity;
     size_t head;                /* lock */
     size_t count;               /* lock: 큐에 있는 연결 수 */
     bool is_stopping;           /* lock: true면 더 안 받고 남은 것만 처리 */
+    size_t running_count;       /* lock: 아직 끝나지 않은 일꾼 수 */
 
     pthread_t *workers;
     size_t worker_count;        /* 실제로 시작한 일꾼 수 */
@@ -30,7 +34,11 @@ static int init_pool(WorkerPool *pool, size_t queue_capacity,
 static int start_workers(WorkerPool *pool, size_t worker_count);
 static void *run_worker(void *argument);
 static bool take_connection(WorkerPool *pool, int *connfd);
-static void stop_workers(WorkerPool *pool);
+static int init_conditions(WorkerPool *pool);
+static void mark_worker_exited(WorkerPool *pool);
+static void request_stop(WorkerPool *pool);
+static int wait_workers_exited(WorkerPool *pool, int timeout_seconds);
+static void join_workers(WorkerPool *pool);
 static void free_pool(WorkerPool *pool);
 static void lock_pool(WorkerPool *pool);
 static void unlock_pool(WorkerPool *pool);
@@ -90,12 +98,30 @@ bool pool_has_waiting(WorkerPool *pool)
     return has_waiting;
 }
 
+bool pool_is_stopping(WorkerPool *pool)
+{
+    lock_pool(pool);
+    bool is_stopping = pool->is_stopping;
+    unlock_pool(pool);
+    return is_stopping;
+}
+
+int pool_stop(WorkerPool *pool, int timeout_seconds)
+{
+    request_stop(pool);
+    if (wait_workers_exited(pool, timeout_seconds) < 0) {
+        return -1;
+    }
+    join_workers(pool);
+    return 0;
+}
+
 void pool_destroy(WorkerPool *pool)
 {
     if (pool == NULL) {
         return;
     }
-    stop_workers(pool);
+    (void)pool_stop(pool, 0);   /* 시간 제한 0은 끝없이 기다려 항상 0 */
     free_pool(pool);
 }
 
@@ -123,12 +149,39 @@ static int init_pool(WorkerPool *pool, size_t queue_capacity,
         return -1;
     }
     pool->is_lock_ready = true;
-    error = pthread_cond_init(&pool->not_empty, NULL);
+    return init_conditions(pool);
+}
+
+/* 조건 변수 두 개를 만든다. all_exited는 시간 제한 기다리기에 쓰므로
+ * 시계를 바꿔도 영향이 없는 CLOCK_MONOTONIC으로 맞춘다.
+ * 반환: 0, 실패 -1 (errno에 원인) */
+static int init_conditions(WorkerPool *pool)
+{
+    pthread_condattr_t attributes;
+
+    int error = pthread_cond_init(&pool->not_empty, NULL);
     if (error != 0) {
         errno = error;
         return -1;
     }
-    pool->is_cond_ready = true;
+    pool->is_not_empty_ready = true;
+
+    error = pthread_condattr_init(&attributes);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
+    error = pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC);
+    if (error == 0) {
+        error = pthread_cond_init(&pool->all_exited, &attributes);
+    }
+    /* 다 쓴 속성 객체. 초기화에 성공한 객체라 destroy는 실패하지 않는다 */
+    (void)pthread_condattr_destroy(&attributes);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
+    pool->is_all_exited_ready = true;
     return 0;
 }
 
@@ -137,9 +190,14 @@ static int init_pool(WorkerPool *pool, size_t queue_capacity,
 static int start_workers(WorkerPool *pool, size_t worker_count)
 {
     for (size_t i = 0; i < worker_count; i++) {
+        /* 일꾼은 끝날 때 running_count를 줄이므로 만들기 전에 센다 */
+        lock_pool(pool);
+        pool->running_count++;
+        unlock_pool(pool);
         int error = pthread_create(&pool->workers[i], NULL, run_worker, pool);
         if (error != 0) {
-            stop_workers(pool);
+            mark_worker_exited(pool);   /* 못 만든 일꾼은 센 것을 되돌린다 */
+            (void)pool_stop(pool, 0);
             errno = error;
             return -1;
         }
@@ -159,6 +217,7 @@ static void *run_worker(void *argument)
     while (take_connection(pool, &connfd)) {
         pool->job(connfd, pool->context);
     }
+    mark_worker_exited(pool);
     return NULL;
 }
 
@@ -184,17 +243,57 @@ static bool take_connection(WorkerPool *pool, int *connfd)
     return true;
 }
 
-/* 종료 표시를 하고 잠든 일꾼을 모두 깨운 뒤, 큐가 빌 때까지 처리하고
- * 끝나기를 기다린다 */
-static void stop_workers(WorkerPool *pool)
+/* 일꾼 하나가 끝났다고 센다. 마지막 일꾼이면 기다리는 쪽을 깨운다 */
+static void mark_worker_exited(WorkerPool *pool)
+{
+    lock_pool(pool);
+    pool->running_count--;
+    if (pool->running_count == 0) {
+        (void)pthread_cond_broadcast(&pool->all_exited);
+    }
+    unlock_pool(pool);
+}
+
+/* 종료 표시를 하고 잠든 일꾼을 모두 깨운다. 일꾼은 큐에 남은 연결을
+ * 다 처리한 뒤 끝난다 */
+static void request_stop(WorkerPool *pool)
 {
     lock_pool(pool);
     pool->is_stopping = true;
     (void)pthread_cond_broadcast(&pool->not_empty);
     unlock_pool(pool);
+}
 
+/* 모든 일꾼이 끝날 때까지 최대 timeout_seconds초 기다린다 (0이면 끝없이).
+ * 반환: 모두 끝남 0, 시간 초과 -1 */
+static int wait_workers_exited(WorkerPool *pool, int timeout_seconds)
+{
+    struct timespec deadline;
+
+    /* CLOCK_MONOTONIC은 POSIX 필수 시계라 실패하지 않는다 */
+    (void)clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_seconds;
+
+    lock_pool(pool);
+    int error = 0;
+    while (pool->running_count > 0 && error != ETIMEDOUT) {
+        if (timeout_seconds == 0) {
+            (void)pthread_cond_wait(&pool->all_exited, &pool->lock);
+            continue;
+        }
+        error = pthread_cond_timedwait(&pool->all_exited, &pool->lock,
+                                       &deadline);
+    }
+    bool is_done = pool->running_count == 0;
+    unlock_pool(pool);
+    return is_done ? 0 : -1;
+}
+
+/* 끝난 일꾼 스레드를 회수한다. 우리가 만든, 아직 join하지 않은 스레드라
+ * 실패하지 않는다 */
+static void join_workers(WorkerPool *pool)
+{
     for (size_t i = 0; i < pool->worker_count; i++) {
-        /* 우리가 만든, 아직 join하지 않은 스레드라 실패하지 않는다 */
         (void)pthread_join(pool->workers[i], NULL);
     }
     pool->worker_count = 0;
@@ -203,7 +302,10 @@ static void stop_workers(WorkerPool *pool)
 static void free_pool(WorkerPool *pool)
 {
     /* 아래 destroy는 쓰는 스레드가 없는 상태라 실패하지 않는다 */
-    if (pool->is_cond_ready) {
+    if (pool->is_all_exited_ready) {
+        (void)pthread_cond_destroy(&pool->all_exited);
+    }
+    if (pool->is_not_empty_ready) {
         (void)pthread_cond_destroy(&pool->not_empty);
     }
     if (pool->is_lock_ready) {

@@ -80,6 +80,14 @@
 /* 연결 하나에서 처리할 최대 요청 수. 마지막 응답은 Connection: close */
 #define KEEPALIVE_MAX_REQUESTS 100
 
+/* graceful shutdown (N4): 종료 신호 뒤 처리 중인 연결을 기다리는 최대 시간.
+ * 넘으면 강제 종료. 요청 읽기(10초), CGI(5초) 한도 안에서 거의 다 끝난다 */
+#define SHUTDOWN_TIMEOUT_SEC 10
+
+/* 연결을 기다리는 메인 스레드가 종료 요청을 다시 확인하는 최대 간격.
+ * 보통은 시그널이 poll을 바로 깨우고, 이건 그 틈에 온 시그널을 위한 보험 */
+#define STOP_CHECK_INTERVAL_SEC 1
+
 /* 응답 헤더 "Keep-Alive: timeout=5" 한 줄 버퍼 */
 #define MAX_KEEP_ALIVE_LINE 64
 

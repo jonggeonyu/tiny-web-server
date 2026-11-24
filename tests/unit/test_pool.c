@@ -1,6 +1,7 @@
 /* 스레드 풀 단위 테스트 (N1, N2). 소켓 대신 pipe fd를 큐에 넣는다. */
 #include <pthread.h>
 #include <stdbool.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "pool.h"
@@ -148,12 +149,61 @@ static void test_n2_submit_fails_when_queue_full(void)
     destroy_log(&log);
 }
 
+/* 일꾼이 안 끝나면 pool_stop은 정한 시간만 기다리고 -1 (N4 강제 종료 판단) */
+static void test_n4_stop_times_out_when_worker_busy(void)
+{
+    JobLog log;
+    init_log(&log, false);
+    WorkerPool *pool = pool_create(1, 1, record_job, &log);
+    CHECK(pool != NULL);
+    CHECK(pool_submit(pool, make_fd()) == 0);
+    wait_running(&log, 1);
+    CHECK(!pool_is_stopping(pool));
+
+    struct timespec start;
+    struct timespec end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    CHECK(pool_stop(pool, 1) == -1);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    CHECK(end.tv_sec - start.tv_sec >= 1 && end.tv_sec - start.tv_sec < 3);
+    CHECK(pool_is_stopping(pool));
+    CHECK(pool_submit(pool, 0) == -1);      /* 종료 중에는 안 받는다 */
+
+    release_jobs(&log);
+    CHECK(pool_stop(pool, 1) == 0);         /* 풀리면 시간 안에 끝난다 */
+    pool_destroy(pool);
+    CHECK(log.handled == 1);
+    destroy_log(&log);
+}
+
+/* 종료해도 큐에 이미 들어온 연결은 버리지 않고 처리한다 (N4) */
+static void test_n4_stop_finishes_queued_connections(void)
+{
+    JobLog log;
+    init_log(&log, false);
+    WorkerPool *pool = pool_create(1, 3, record_job, &log);
+    CHECK(pool != NULL);
+    for (int i = 0; i < 4; i++) {           /* 처리 중 1 + 대기 3 */
+        CHECK(pool_submit(pool, make_fd()) == 0);
+        if (i == 0) {
+            wait_running(&log, 1);
+        }
+    }
+    release_jobs(&log);
+    CHECK(pool_stop(pool, 2) == 0);
+    CHECK(log.handled == 4);
+    pool_destroy(pool);
+    destroy_log(&log);
+}
+
 int main(void)
 {
     RUN(test_n1_create_rejects_zero_sizes);
     RUN(test_n1_every_submitted_connection_is_handled);
     RUN(test_n1_workers_run_in_parallel);
     RUN(test_n2_submit_fails_when_queue_full);
+    RUN(test_n4_stop_times_out_when_worker_busy);
+    RUN(test_n4_stop_finishes_queued_connections);
     printf("pool: %d checks, %d failed\n", test_checks, test_failures);
     return TEST_EXIT_CODE();
 }

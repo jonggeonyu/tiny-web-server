@@ -148,8 +148,9 @@ static int wait_for_next_request(Rio *rio)
 }
 
 /* 응답 뒤 연결을 유지할지 정한다 (F11).
- * 클라이언트가 원하고, 요청 수 한도 전이고, 큐에 기다리는 연결이 없을 때만.
- * 기다리는 연결이 있으면 이 일꾼을 양보하려고 닫는다 (N2) */
+ * 클라이언트가 원하고, 요청 수 한도 전이고, 큐에 기다리는 연결이 없고,
+ * 서버가 종료 중이 아닐 때만. 기다리는 연결이 있으면 이 일꾼을 양보하려고
+ * 닫는다 (N2) */
 static bool is_keep_alive_allowed(const HttpRequest *request,
                                   const ConnectionContext *context,
                                   int served)
@@ -160,10 +161,12 @@ static bool is_keep_alive_allowed(const HttpRequest *request,
     if (served + 1 >= KEEPALIVE_MAX_REQUESTS) {
         return false;
     }
-    if (context->pool != NULL && pool_has_waiting(context->pool)) {
-        return false;
+    if (context->pool == NULL) {
+        return true;
     }
-    return true;
+    /* 종료 중이면 연결을 빨리 정리하려고 닫는다 (N4) */
+    return !pool_has_waiting(context->pool)
+           && !pool_is_stopping(context->pool);
 }
 
 /* URI를 디스크 경로로 먼저 풀고(F8) CGI인지 정적 파일인지 고른다.

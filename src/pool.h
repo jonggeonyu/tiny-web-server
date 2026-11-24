@@ -29,8 +29,18 @@ int pool_submit(WorkerPool *pool, int connfd);
  * 있으면 keep-alive를 끊어 일꾼을 양보한다 (F11). */
 bool pool_has_waiting(WorkerPool *pool);
 
-/* 새 연결을 더 받지 않고, 큐에 남은 연결까지 다 처리한 뒤 일꾼을 끝내고
- * 풀을 해제한다. 모든 일꾼이 끝날 때까지 돌아오지 않는다. */
+/* 종료가 시작됐는지 (pool_stop을 불렀는지). 종료 중에는 keep-alive를
+ * 끊어 연결을 빨리 정리한다 (N4). */
+bool pool_is_stopping(WorkerPool *pool);
+
+/* 새 연결을 더 받지 않고, 큐에 남은 연결까지 다 처리하면 일꾼을 끝낸다.
+ * timeout_seconds 안에 모든 일꾼이 끝나기를 기다린다 (0이면 끝없이).
+ * 반환: 모두 끝남 0, 시간 초과 -1. -1이면 아직 일하는 일꾼이 있으므로
+ * pool_destroy를 부르지 말고 프로세스를 끝낸다 (N4 강제 종료). */
+int pool_stop(WorkerPool *pool, int timeout_seconds);
+
+/* pool_stop(pool, 0)으로 일꾼을 다 끝낸 뒤 풀을 해제한다.
+ * 모든 일꾼이 끝날 때까지 돌아오지 않는다. */
 void pool_destroy(WorkerPool *pool);
 
 #endif

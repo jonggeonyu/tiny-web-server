@@ -34,6 +34,7 @@ static int format_variable(char *out, size_t out_size, const char *name,
 static FILE *write_body_file(const char *body, size_t length);
 static void run_child(const char *program, int stdin_fd, int stdout_fd,
                       char *const environment[], long max_fd);
+static int restore_default_signals(void);
 static int collect_output(pid_t pid, int fd, CgiResult *result);
 static int read_output(int fd, CgiResult *result,
                        const struct timespec *deadline);
@@ -225,12 +226,15 @@ static FILE *write_body_file(const char *body, size_t length)
  * 연결 소켓·listen 소켓 같은 서버 fd는 프로그램에 물려주지 않게 다 닫는다.
  * 자기 프로세스 그룹을 만들어서, 시간 초과 때 프로그램이 띄운 자식(셸 스크립트의
  * sleep 등)까지 한 번에 죽일 수 있게 한다.
- * async-signal-safe 함수(setpgid, dup2, close, execve, _exit)만 쓴다.
- * 돌아오지 않는다 */
+ * 서버가 바꿔 둔 시그널 설정(SIGPIPE 무시, 종료 시그널 막기)은 exec 뒤에도
+ * 물려지므로 기본값으로 되돌린다.
+ * async-signal-safe 함수(setpgid, sigaction, sigprocmask, dup2, close,
+ * execve, _exit)만 쓴다. 돌아오지 않는다 */
 static void run_child(const char *program, int stdin_fd, int stdout_fd,
                       char *const environment[], long max_fd)
 {
     if (setpgid(0, 0) < 0
+        || restore_default_signals() < 0
         || dup2(stdin_fd, STDIN_FILENO) < 0
         || dup2(stdout_fd, STDOUT_FILENO) < 0) {
         _exit(EXEC_FAILED_EXIT);
@@ -241,6 +245,24 @@ static void run_child(const char *program, int stdin_fd, int stdout_fd,
     char *const arguments[] = {(char *)program, NULL};
     execve(program, arguments, environment);
     _exit(EXEC_FAILED_EXIT);    /* execve는 실패할 때만 돌아온다 */
+}
+
+/* SIGPIPE를 기본 동작으로, 막아 둔 시그널(SIGINT, SIGTERM)을 모두 푼다.
+ * 반환: 0, 실패 -1 */
+static int restore_default_signals(void)
+{
+    struct sigaction action;
+    sigset_t none;
+
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    if (sigemptyset(&action.sa_mask) < 0 || sigemptyset(&none) < 0) {
+        return -1;
+    }
+    if (sigaction(SIGPIPE, &action, NULL) < 0) {
+        return -1;
+    }
+    return sigprocmask(SIG_SETMASK, &none, NULL);
 }
 
 /* 출력을 끝까지 받고 자식이 정상 종료했는지 본다. 전체가 CGI_TIMEOUT_SEC 안에

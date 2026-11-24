@@ -98,7 +98,8 @@ count=$(printf '%s' "$reply" | grep -c "^HTTP/1.1 200")
 urls=()
 for _ in $(seq 1 101); do urls+=("http://127.0.0.1:$PORT/split.txt"); done
 before=$(count_accepted "$PORT")
-curl_local -o /dev/null "${urls[@]}" >/dev/null
+# 요청 101개라 ASan 빌드에서는 curl_local의 5초를 넘을 수 있어 30초로 늘린다
+timeout 30 curl --noproxy '*' -s "${urls[@]}" >/dev/null
 sleep 0.2
 used=$(( $(count_accepted "$PORT") - before ))
 [ "$used" = 2 ] && pass "f11_max_100_requests_per_connection" \
