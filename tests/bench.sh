@@ -6,6 +6,7 @@
 #   BENCH_SECS=2 BENCH_RUNS=1 bash tests/bench.sh   # 빠르게 대충
 #
 # 조합마다 BENCH_RUNS 번 재서 처리량의 "중간값" 회차를 표에 쓴다 (실행마다 흔들리므로).
+# 프록시 경유 표는 같은 서버를 백엔드 2개(라운드로빈) + 프록시 1개로 띄워서 잰다 → 직접 접속 표와 비교.
 # 서버 로그는 회차마다 지운다 (/tmp 가 메모리 위의 tmpfs 일 수 있으므로 쌓지 않는다).
 
 set -u
@@ -29,28 +30,59 @@ cp -r www "$WORK/www"
 head -c 1048576 /dev/urandom > "$WORK/www/1mb.bin"
 
 SRV=
-cleanup() { [ -n "$SRV" ] && kill -KILL "$SRV" 2>/dev/null; rm -rf "$WORK"; }
+BACKENDS=()  # 프록시 모드에서 띄운 백엔드 PID
+cleanup() {
+    [ -n "$SRV" ] && kill -KILL "$SRV" 2>/dev/null
+    local p
+    for p in "${BACKENDS[@]}"; do kill -KILL "$p" 2>/dev/null; done
+    rm -rf "$WORK"
+}
 trap cleanup EXIT
 
-PORT=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+free_port() { python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
+PORT=$(free_port)
+BPORT1=$(free_port)
+BPORT2=$(free_port)
+MODE=direct  # direct: 서버 하나에 직접 / proxy: 프록시(PORT) → 백엔드 2개(BPORT1, BPORT2)
 
-start() {
-    "$BIN" -p "$PORT" -r "$WORK/www" -c cgi-bin > "$WORK/srv.log" 2>&1 &
-    SRV=$!
+wait_up() { # wait_up 포트 로그
     local i
     for ((i = 0; i < 50; i++)); do
-        curl -s --max-time 1 -o /dev/null "http://127.0.0.1:$PORT/" && return 0
+        curl -s --max-time 1 -o /dev/null "http://127.0.0.1:$1/" && return 0
         sleep 0.1
     done
-    echo "서버 시작 실패" >&2; cat "$WORK/srv.log" >&2; exit 1
+    echo "서버 시작 실패 (포트 $1)" >&2; cat "$2" >&2; exit 1
+}
+start() {
+    if [ "$MODE" = proxy ]; then
+        local bp
+        for bp in "$BPORT1" "$BPORT2"; do
+            "$BIN" -p "$bp" -r "$WORK/www" -c cgi-bin > "$WORK/b$bp.log" 2>&1 &
+            BACKENDS+=("$!")
+            wait_up "$bp" "$WORK/b$bp.log"
+        done
+        # "/" = 모든 요청을 프록시 → 직접 접속과 같은 경로(/index.html 등)로 잴 수 있다
+        "$BIN" -p "$PORT" -r "$WORK/www" -c cgi-bin \
+            -P "/=127.0.0.1:$BPORT1,127.0.0.1:$BPORT2" > "$WORK/srv.log" 2>&1 &
+    else
+        "$BIN" -p "$PORT" -r "$WORK/www" -c cgi-bin > "$WORK/srv.log" 2>&1 &
+    fi
+    SRV=$!
+    wait_up "$PORT" "$WORK/srv.log"
+}
+stop_pid() {
+    kill -INT "$1" 2>/dev/null
+    local i
+    for ((i = 0; i < 100; i++)); do kill -0 "$1" 2>/dev/null || break; sleep 0.1; done
+    kill -KILL "$1" 2>/dev/null
+    wait "$1" 2>/dev/null
 }
 stop() {
-    kill -INT "$SRV" 2>/dev/null
-    local i
-    for ((i = 0; i < 100; i++)); do kill -0 "$SRV" 2>/dev/null || break; sleep 0.1; done
-    kill -KILL "$SRV" 2>/dev/null
-    wait "$SRV" 2>/dev/null
+    stop_pid "$SRV"
     SRV=
+    local p
+    for p in "${BACKENDS[@]}"; do stop_pid "$p"; done
+    BACKENDS=()
 }
 
 # ------------------------------------------------------------------ 한 번 재기
@@ -168,6 +200,17 @@ ab_static_k()  { ab_static k 1 "$1"; }
     if [ $HAVE_WRK = 1 ]; then
         measure_table "CGI (hello.sh) · wrk" "1 10 32 64 128" wrk_cgi
     fi
+
+    # 프록시 경유: 클라이언트 → 프록시 → 백엔드 2개 (라운드로빈). 위의 직접 접속 표와 비교한다.
+    # 프록시는 백엔드에 요청마다 새 연결을 열고(Connection: close) 응답을 모아서 보낸다 → 그 비용이 차이로 보인다
+    MODE=proxy
+    measure_table "프록시 경유 · 정적 1.4KB (index.html) · ab · keep-alive 없음" "1 10 50 100 200" ab_static_nk
+    measure_table "프록시 경유 · 정적 1.4KB (index.html) · ab -k · keep-alive" "1 10 50 100 200" ab_static_k
+    if [ $HAVE_WRK = 1 ]; then
+        measure_table "프록시 경유 · 정적 1.4KB (index.html) · wrk · keep-alive" "1 10 50 100 200" wrk_static
+    fi
+    measure_table "프록시 경유 · 정적 1MB 파일 · ab -k" "1 10 50 100" ab_big
+    MODE=direct
 } >> "$R"
 
 [ $HAVE_WRK = 1 ] || printf '\n> wrk 가 설치되어 있지 않아 wrk 측정은 건너뜀 (sudo apt install wrk)\n' >> "$R"
