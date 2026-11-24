@@ -6,6 +6,7 @@
 #define CONFIG_H
 
 #include <limits.h> /* PATH_MAX */
+#include <sys/socket.h> /* struct sockaddr_storage (프록시 백엔드 주소) */
 
 /* 요청 헤더 전체(요청 라인 + 헤더 + 빈 줄)의 최대 크기. 넘으면 431 */
 #define HTTP_HEAD_MAX 8192
@@ -61,14 +62,43 @@
  * fd 번호는 "비어 있는 가장 작은 번호"부터 쓰이므로, 서버가 동시에 여는 fd 개수가
  * 이보다 작으면 모든 fd 번호가 이 범위 안에 있다 → 비리눅스에서도 누출 없음.
  *   표준입출력 3 + 듣기 1 + 깨우기 파이프 2개(linger, keep-alive) 4 + 대기열 + 일꾼×(클라이언트 1 + 파이프 4)
+ *   (일꾼은 CGI 파이프 4개 또는 프록시 백엔드 소켓 1개 중 하나만 쓰므로 파이프 4 안에 포함)
  *   + linger + keep-alive 보관 + accept 직후 손에 든 1 */
 #define CHILD_CLOSE_FD_MAX 4096
 _Static_assert(3 + 1 + 4 + MAX_QUEUE + MAX_THREADS * 5 + LINGER_MAX + KEEPALIVE_MAX + 1 <
                    CHILD_CLOSE_FD_MAX,
                "동시에 열릴 수 있는 fd 수가 CHILD_CLOSE_FD_MAX 를 넘음");
 
-/* 실행 시 정해지는 설정 (명령줄 인자로 채운다).
- * 2단계에서 routes[], backends[] 같은 항목을 여기에 추가한다. */
+/* 리버스 프록시 (-P /api=127.0.0.1:8001,127.0.0.1:8002) */
+#define PROXY_MAX_BACKENDS 8      /* 백엔드 최대 개수 (고정 배열) */
+#define PROXY_MAX_TRIES 2         /* 요청 하나당 시도할 백엔드 수 (처음 + 재시도 1번) */
+#define PROXY_PREFIX_MAX 256      /* 프록시 경로 prefix 최대 길이 */
+#define PROXY_HOST_MAX 256        /* 백엔드 호스트 이름 최대 길이 */
+#define PROXY_CONNECT_TIMEOUT_MS 2000           /* 백엔드 연결 최대 시간. 넘으면 다음 백엔드 → 다 실패하면 504 */
+#define DEFAULT_PROXY_RESPONSE_TIMEOUT_MS 10000 /* 요청을 보낸 뒤 응답을 다 받을 때까지 최대 시간. 넘으면 504 */
+#define PROXY_RESPONSE_HEAD_MAX 8192            /* 백엔드 응답 헤더 최대 크기. 넘으면 502 */
+#define PROXY_BODY_MAX (8 * 1024 * 1024)        /* 백엔드 응답 본문 최대 크기 (메모리에 모아서 보냄). 넘으면 502 */
+/* 백엔드로 보낼 요청 머리 최대 크기: 받은 헤더(최대 HTTP_HEAD_MAX) + 우리가 붙이는 헤더 여유분 */
+#define PROXY_REQUEST_HEAD_MAX (HTTP_HEAD_MAX + 1024)
+
+/* 백엔드 서버 하나 */
+typedef struct {
+    char host[PROXY_HOST_MAX];        /* "127.0.0.1" */
+    int port;                         /* 8001 */
+    char label[PROXY_HOST_MAX + 16];  /* 로그와 Host 헤더용 "127.0.0.1:8001" */
+    struct sockaddr_storage addr;     /* 시작할 때 한 번 해석해 둔 주소 (요청마다 DNS 조회 안 함) */
+    socklen_t addr_len;
+} proxy_backend;
+
+/* 프록시 설정. prefix 가 빈 문자열이면 프록시 끔 */
+typedef struct {
+    char prefix[PROXY_PREFIX_MAX];    /* "/api" (끝에 '/' 없음). "/" 이면 모든 요청을 프록시 */
+    proxy_backend backends[PROXY_MAX_BACKENDS];
+    int backend_count;
+    int response_timeout_ms;
+} proxy_config;
+
+/* 실행 시 정해지는 설정 (명령줄 인자로 채운다). */
 typedef struct {
     int port;
     char root[PATH_MAX];      /* 정적 파일 루트. realpath 로 바꾼 절대 경로 (끝에 '/' 없음) */
@@ -82,6 +112,7 @@ typedef struct {
     int threads;              /* 일꾼 스레드 수 */
     int queue_size;           /* 대기열 칸 수 (가득 차면 503) */
     int shutdown_timeout_s;   /* 안전한 종료의 강제 시한 (초). 0 = 시한 없음 */
+    proxy_config proxy;       /* 리버스 프록시 (-P). prefix 가 비어 있으면 끔 */
 } server_config;
 
 #endif /* CONFIG_H */
