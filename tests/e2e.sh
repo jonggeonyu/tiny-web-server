@@ -475,6 +475,55 @@ if [ -z "$E2E_WRAP" ]; then
     wait "$FP" 2>/dev/null
 fi
 
+# ④ 대기열에서 기다리던 연결도 종료 전에 처리됨 (일꾼 1개: CGI 가 일꾼을 잡은 동안 두 번째 요청은 대기열에)
+start_server Q -t 1 || exit 1
+UQ=http://127.0.0.1:$Q_PORT
+$C -o "$WORK/q_inflight.out" "$UQ/cgi-bin/slow.sh" &
+QP1=$!
+sleep 0.3
+$C -i "$UQ/hello.txt" > "$WORK/q_queued.out" &
+QP2=$!
+sleep 0.3
+stop_server "$Q_PID" TERM
+wait "$QP1" "$QP2"
+check_has "처리 중이던 CGI 는 끝까지 응답" "slow done" "$(cat "$WORK/q_inflight.out")"
+check "대기열에 있던 연결도 200 으로 응답" "HTTP/1.1 200 OK" "$(head -1 "$WORK/q_queued.out" | tr -d '\r')"
+check_has "그 응답도 Connection: close" "Connection: close" "$(tr -d '\r' < "$WORK/q_queued.out")"
+check "대기열까지 비운 뒤 정상 종료 (종료 코드 0)" 0 "$STOP_RC"
+
+# ⑤ 강제 시한: 헤더를 아주 천천히 보내는 클라이언트가 일꾼을 붙잡아도 -S 초 뒤에는 끝난다
+if [ -z "$E2E_WRAP" ]; then
+    start_server D -S 2 || exit 1
+    timeout 15 python3 -I -c '
+import socket, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nX-Slow: ")
+for _ in range(20):                       # 0.5초마다 1바이트: 유휴(10초)/요청(30초) 시간 제한에 안 걸림
+    time.sleep(0.5)
+    try:
+        s.sendall(b"a")
+    except OSError:
+        break
+' "$D_PORT" &
+    DP=$!
+    sleep 0.5
+    t0=$(date +%s%N)
+    stop_server "$D_PID" TERM
+    took=$(( ($(date +%s%N) - t0) / 1000000 ))
+    check "시한 초과 → 강제 종료 (종료 코드 1)" 1 "$STOP_RC"
+    check_time "시한(2초) 직후에 끝남 (ms)" 3500 "$took"
+    check_lt "시한보다 일찍 끝나지는 않음 (ms)" "$took" 1500
+    check_has "로그: 종료 시한 초과" "종료 시한 초과" "$(cat "$D_LOG")"
+    kill "$DP" 2>/dev/null; wait "$DP" 2>/dev/null
+
+fi
+
+# ⑥ CGI 자식은 서버가 막아 둔 시그널 마스크를 물려받지 않는다 (막힌 채로 exec 하면 kill -TERM 이 안 먹는다)
+start_server M || exit 1
+SIGBLK=$($C "http://127.0.0.1:$M_PORT/cgi-bin/sigmask.sh" | awk '/SigBlk/{print $2}')
+check "CGI 의 막힌 시그널 없음 (SigBlk)" 0000000000000000 "$SIGBLK"
+stop_server "$M_PID"
+
 # ================================================================== 메모리 검사 집계
 section "메모리 검사"
 # (1) ASan/LSan/UBSan/TSan 보고: 어떤 빌드든 서버 로그에 나오면 안 된다
