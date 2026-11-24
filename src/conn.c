@@ -22,10 +22,33 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 /* 로그 줄 앞에 붙이는 일꾼 번호. 여러 일꾼의 로그가 섞여도 누구 것인지 알 수 있게 */
 #define WTAG "[w%02d] "
+/* 접근 로그 줄 앞: 시각 + 일꾼 번호 */
+#define ATAG "%s [w%02d] "
+#define LOG_TIME_SIZE 32
+
+/* 접근 로그의 시각 "2026-11-24 17:20:01" (서버 컴퓨터의 현지 시각).
+ * localtime_r: 스레드 안전 버전 (localtime 은 공유 버퍼를 써서 일꾼끼리 덮어쓸 수 있다) */
+static const char *format_log_time(char *buf, size_t cap)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    if (localtime_r(&now, &tm) == NULL || strftime(buf, cap, "%Y-%m-%d %H:%M:%S", &tm) == 0)
+        snprintf(buf, cap, "-");
+    return buf;
+}
+
+/* 처리 시간 측정용 마이크로초 시계 (시계를 바꿔도 영향 없는 "흐른 시간" 시계) */
+static long long now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
 
 /* 처리한 요청 수. 여러 일꾼이 동시에 더하므로 원자적(atomic) 변수:
  * "읽고 → 1 더하고 → 쓰기"가 중간에 끊기지 않는 한 동작으로 일어나서 자물쇠 없이도 숫자가 틀리지 않는다 */
@@ -308,6 +331,7 @@ void conn_handle(int client_fd, const server_config *cfg, int served)
     /* 한 연결에서 요청을 반복 처리한다. 이 반복을 계속하는 경우는 단 하나:
      * "연결을 유지하기로 했고, 다음 요청의 앞부분이 이미 buf 에 와 있을 때"(파이프라이닝).
      * 다음 요청이 아직 안 왔으면 일꾼이 기다리지 않고 보관 스레드에 맡긴다 (END_PARK). */
+    char log_time[LOG_TIME_SIZE];
     for (;;) {
         http_writer w;
         writer_init(&w, client_fd);
@@ -339,25 +363,30 @@ void conn_handle(int client_fd, const server_config *cfg, int served)
              * 보내다 만 요청에만 408 을 알려준다 */
             if (used > 0) {
                 writer_send_error(&w, 408);
-                printf(WTAG "%s:%d → 408 Request Timeout (헤더가 %zu바이트에서 멈춤)\n", wid,
-                       remote_addr, remote_port, used);
+                printf(ATAG "%s:%d → 408 Request Timeout (헤더가 %zu바이트에서 멈춤)\n",
+                       format_log_time(log_time, sizeof(log_time)), wid, remote_addr, remote_port,
+                       used);
             }
             close_now = 1;
         } else if (r == HTTP_PARSE_ERROR) {
             /* 요청을 해석하지 못함 → 에러 응답 (parsed_ok=0 이므로 writer 가 Connection: close 로 보냄) */
             writer_send_error(&w, req->error_status);
-            printf(WTAG "%s:%d → %d %s (%s)\n", wid, remote_addr, remote_port, w.status,
-                   http_status_text(w.status), req->error_reason);
+            printf(ATAG "%s:%d → %d %s (%s)\n", format_log_time(log_time, sizeof(log_time)), wid,
+                   remote_addr, remote_port, w.status, http_status_text(w.status),
+                   req->error_reason);
         } else {
             w.head_only = (strcmp(req->method, "HEAD") == 0);
+            long long started_us = now_us(); /* 처리 시간 = 헤더를 다 받은 뒤 ~ 응답을 다 보낼 때까지 */
             handle_request(client_fd, req, buf, used, &w, cfg, deadline, remote_addr,
                            remote_port, &body_done, &body_from_buf, &close_now);
+            double took_ms = (double)(now_us() - started_us) / 1000.0;
 
-            printf(WTAG "%s:%d #%d \"%s %s HTTP/%d.%d\" → %d %s (본문 %lld바이트%s)%s%s%s\n", wid,
-                   remote_addr, remote_port, nth, req->method, req->target, req->version_major,
-                   req->version_minor, w.status, http_status_text(w.status), w.body_len,
-                   w.head_only ? ", HEAD 라서 생략" : "", w.keep_alive ? " [유지]" : " [닫음]",
-                   w.note ? " - " : "", w.note ? w.note : "");
+            printf(ATAG "%s:%d #%d \"%s %s HTTP/%d.%d\" → %d %s (본문 %lld바이트%s)%s%s%s (%.1fms)\n",
+                   format_log_time(log_time, sizeof(log_time)), wid, remote_addr, remote_port, nth,
+                   req->method, req->target, req->version_major, req->version_minor, w.status,
+                   http_status_text(w.status), w.body_len, w.head_only ? ", HEAD 라서 생략" : "",
+                   w.keep_alive ? " [유지]" : " [닫음]", w.note ? " - " : "", w.note ? w.note : "",
+                   took_ms);
         }
         fflush(stdout);
         served = nth;
