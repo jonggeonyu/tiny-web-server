@@ -11,6 +11,7 @@
 #   E2E_WRAP       서버 앞에 붙일 명령
 #   E2E_VALGRIND   1 이면 서버마다 valgrind 로 감싸고, 끝에 결과를 집계 (build/valgrind-logs/ 에 로그 보관)
 #   E2E_SKIP_SLOW  1 이면 몇 초씩 걸리는 시간 초과 테스트를 건너뜀 (valgrind 처럼 느린 실행용)
+#   E2E_KEEP       1 이면 끝난 뒤 임시 폴더(서버 로그 포함)를 지우지 않고 경로를 알려 줌 (실패 원인 조사용)
 #
 # 안전 규칙 (예전에 겪은 문제들): 서버 PID 를 직접 저장해서 그것만 종료, 모든 curl 에 --max-time,
 # wait 는 PID 를 지정해서, 끝나면 trap 으로 서버와 임시 폴더를 반드시 정리.
@@ -143,6 +144,7 @@ cleanup() {
     local p
     for p in "${SRV_PIDS[@]}"; do kill -KILL "$p" 2>/dev/null; done
     chmod -R u+rwX "$WORK" 2>/dev/null
+    [ -n "${E2E_KEEP:-}" ] && { echo "작업 폴더 보존: $WORK" >&2; return; }
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -638,8 +640,16 @@ check_has "거부 이유를 알려 줌" "이 서버 자신" "$("$E2E_BIN" -p 189
 # ================================================================== 메모리 검사 집계
 section "메모리 검사"
 # (1) ASan/LSan/UBSan/TSan 보고: 어떤 빌드든 서버 로그에 나오면 안 된다
-SAN=$(cat "$WORK"/*.log 2>/dev/null | grep -aE 'ERROR: AddressSanitizer|ERROR: LeakSanitizer|runtime error:|WARNING: ThreadSanitizer' | head -3)
+SAN=$(cat "$WORK"/*.log 2>/dev/null | grep -aE 'ERROR: AddressSanitizer|ERROR: LeakSanitizer|runtime error:|WARNING: ThreadSanitizer' | grep -av 'thread leak' | head -3)
 check "서버 로그에 sanitizer 보고 없음" "" "$SAN"
+# TSan 의 "thread leak" 은 일꾼을 join 하지 않고 끝냈다는 뜻이다.
+# 두 번째 Ctrl+C(즉시 종료)와 종료 시한 초과(강제 종료)는 일부러 기다리지 않고 끝내므로 그 서버만 허용한다
+LEAK=""
+for f in "$WORK"/*.log; do
+    grep -aq 'WARNING: ThreadSanitizer: thread leak' "$f" || continue
+    grep -aqE '즉시 종료|강제 종료' "$f" || LEAK+="$(basename "$f") "
+done
+check "TSan thread leak 은 일부러 즉시/강제 종료한 서버에만" "" "$LEAK"
 
 # (2) valgrind: 서버 프로세스마다 집계 ("ERROR SUMMARY" 가 있는 로그 = 끝까지 실행된 서버.
 #     CGI 를 위해 fork 한 자식은 exec 순간 valgrind 를 벗어나므로 요약이 없다)
