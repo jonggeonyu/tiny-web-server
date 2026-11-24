@@ -36,6 +36,15 @@
 /* 스레드 풀 (기본값은 main.c 에서 CPU 수로 계산) */
 #define MAX_THREADS 256
 #define MAX_QUEUE   1024
+/* 대기열 기본 크기의 최솟값. 일꾼 수 x 4 가 이보다 작으면 이 값을 쓴다.
+ * 쉬는 keep-alive 연결은 대기열이 아니라 보관 스레드에 있으므로, 대기열에는 "지금 요청을 보낸" 연결만 들어온다.
+ * 32칸(일꾼 8 x 4)이면 동시 접속 100 에서도 503 이 나와서 키웠다 */
+#define DEFAULT_QUEUE_MIN 256
+
+/* 안전한 종료의 강제 시한 (초). 종료 신호 뒤 이 시간 안에 처리 중인 요청이 끝나지 않으면
+ * 실행 중인 CGI 를 정리하고 종료 코드 1 로 바로 끝낸다. 0 이면 시한 없음 */
+#define DEFAULT_SHUTDOWN_TIMEOUT_S 10
+#define MAX_SHUTDOWN_TIMEOUT_S 3600
 
 /* 부드럽게 닫기(lingering close): 전용 스레드 하나가 최대 LINGER_MAX 개 연결을 동시에 맡는다 */
 #define LINGER_TIMEOUT_MS 2000
@@ -72,6 +81,7 @@ typedef struct {
     int max_requests;         /* 연결 하나에서 처리할 최대 요청 수 */
     int threads;              /* 일꾼 스레드 수 */
     int queue_size;           /* 대기열 칸 수 (가득 차면 503) */
+    int shutdown_timeout_s;   /* 안전한 종료의 강제 시한 (초). 0 = 시한 없음 */
 } server_config;
 
 #endif /* CONFIG_H */

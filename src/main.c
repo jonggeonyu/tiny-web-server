@@ -1,7 +1,7 @@
 /*
  * tiny-web-server 진입점: 명령줄 인자 해석, 시그널 설정, 서버 시작.
  *
- *   ./build/tiny -p 8080 -r ./www -c ./cgi-bin [-t 일꾼수] [-q 대기열] [-T 유휴시간(초)]
+ *   ./build/tiny -p 8080 -r ./www -c ./cgi-bin [-t 일꾼수] [-q 대기열] [-T 유휴시간(초)] [-S 종료시한(초)]
  */
 #include "config.h"
 #include "server.h"
@@ -20,15 +20,18 @@
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트] [-c CGI디렉토리] [-t 일꾼수] [-q 대기열] [-T 초]\n",
+    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트] [-c CGI디렉토리] [-t 일꾼수] [-q 대기열] [-T 초] [-S 초]\n",
             prog);
     fprintf(stderr, "  -p 포트   듣는 포트 번호 (1~65535, 기본값 %d)\n", DEFAULT_PORT);
     fprintf(stderr, "  -r 루트   정적 파일 루트 디렉토리 (기본값 %s)\n", DEFAULT_ROOT);
     fprintf(stderr, "  -c 디렉토리 CGI 프로그램 디렉토리 (기본값 %s)\n", DEFAULT_CGI_DIR);
     fprintf(stderr, "  -t 개수   일꾼 스레드 수 (1~%d, 기본값 CPU 수 x 2, 4~64 사이)\n", MAX_THREADS);
-    fprintf(stderr, "  -q 칸수   대기열 크기 (1~%d, 기본값 일꾼 수 x 4). 가득 차면 503\n", MAX_QUEUE);
+    fprintf(stderr, "  -q 칸수   대기열 크기 (1~%d, 기본값 일꾼 수 x 4, 최소 %d). 가득 차면 503\n", MAX_QUEUE,
+            DEFAULT_QUEUE_MIN);
     fprintf(stderr, "  -T 초     클라이언트가 아무것도 안 보낼 때 기다리는 최대 시간 (기본값 %d)\n",
             DEFAULT_IDLE_TIMEOUT_MS / 1000);
+    fprintf(stderr, "  -S 초     종료 신호 뒤 처리 중인 요청을 기다리는 최대 시간, 0 = 무제한 (기본값 %d)\n",
+            DEFAULT_SHUTDOWN_TIMEOUT_S);
 }
 
 /* 문자열을 포트 번호로 변환. 숫자가 아니거나 범위를 벗어나면 -1 */
@@ -87,11 +90,12 @@ int main(int argc, char **argv)
     cfg.max_requests = DEFAULT_MAX_REQUESTS;
     cfg.threads = default_threads();
     cfg.queue_size = 0; /* 0 = 일꾼 수에 맞춰 아래에서 계산 */
+    cfg.shutdown_timeout_s = DEFAULT_SHUTDOWN_TIMEOUT_S;
     const char *root_arg = DEFAULT_ROOT;
     const char *cgi_arg = DEFAULT_CGI_DIR;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:r:c:t:q:T:h")) != -1) {
+    while ((opt = getopt(argc, argv, "p:r:c:t:q:T:S:h")) != -1) {
         switch (opt) {
         case 'p':
             cfg.port = parse_port(optarg);
@@ -129,6 +133,18 @@ int main(int argc, char **argv)
             cfg.idle_timeout_ms = sec * 1000;
             break;
         }
+        case 'S': {
+            /* 0 = 시한 없음도 허용해야 하므로 parse_port(1 이상만 허용) 대신 직접 검사 */
+            char *end;
+            errno = 0;
+            long sec = strtol(optarg, &end, 10);
+            if (errno != 0 || end == optarg || *end != '\0' || sec < 0 || sec > MAX_SHUTDOWN_TIMEOUT_S) {
+                fprintf(stderr, "잘못된 종료 시한(초): %s (0~%d)\n", optarg, MAX_SHUTDOWN_TIMEOUT_S);
+                return 1;
+            }
+            cfg.shutdown_timeout_s = (int)sec;
+            break;
+        }
         case 'h':
             usage(argv[0]);
             return 0;
@@ -140,6 +156,8 @@ int main(int argc, char **argv)
 
     if (cfg.queue_size == 0) {
         cfg.queue_size = cfg.threads * 4;
+        if (cfg.queue_size < DEFAULT_QUEUE_MIN)
+            cfg.queue_size = DEFAULT_QUEUE_MIN;
         if (cfg.queue_size > MAX_QUEUE)
             cfg.queue_size = MAX_QUEUE;
     }

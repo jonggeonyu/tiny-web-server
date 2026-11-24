@@ -140,6 +140,34 @@ static void on_signal(int sig)
     errno = saved;
 }
 
+/* 강제 시한 처리기 (SIGALRM): 종료 신호 뒤 shutdown_timeout_s 가 지나도 일꾼이 다 끝나지 않았을 때.
+ * 두 번째 종료 신호와 같은 일을 한다: 실행 중인 CGI 를 정리하고 _exit (처리기 안에서 안전한 것만 쓴다) */
+static void on_shutdown_deadline(int sig)
+{
+    (void)sig;
+    static const char msg[] = "[main] 종료 시한 초과 → 남은 요청을 기다리지 않고 강제 종료\n";
+    ssize_t ignored = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)ignored;
+    cgi_kill_all_running();
+    _exit(1); /* 정상 종료(0)와 구분: 처리 중이던 요청을 다 끝내지 못했다 */
+}
+
+/* 종료 강제 시한을 건다. alarm 은 프로세스에 하나뿐인 타이머라 스레드를 더 만들 필요가 없다.
+ * SIGALRM 은 일꾼 스레드에서도 막혀 있지 않으므로 어느 스레드든 받아서 처리기를 실행한다.
+ * fork 한 CGI 자식에게는 alarm 이 물려지지 않는다. 반환: 0 / -1 (시한 없이 계속 진행) */
+static int arm_shutdown_deadline(int seconds)
+{
+    if (seconds <= 0)
+        return 0;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_shutdown_deadline;
+    if (sigemptyset(&sa.sa_mask) < 0 || sigaction(SIGALRM, &sa, NULL) < 0)
+        return -1;
+    (void)alarm((unsigned)seconds); /* 반환값은 이전 알람의 남은 시간이라 쓸 일이 없다 */
+    return 0;
+}
+
 static void close_sig_pipe(void)
 {
     close(g_sig_pipe[0]);
@@ -327,6 +355,13 @@ int server_run(int listen_fd, const server_config *cfg)
         printf("\n[main] 시작 준비 실패 → 정리 후 종료\n");
     fflush(stdout);
 
+    /* ⓞ 강제 시한: 아래 ⓒ 가 cfg->shutdown_timeout_s 안에 안 끝나면 처리기가 프로세스를 끝낸다 */
+    if (arm_shutdown_deadline(cfg->shutdown_timeout_s) < 0)
+        fprintf(stderr, "[main] 종료 시한 설정 실패 (%s) → 시한 없이 기다립니다\n", strerror(errno));
+    else if (cfg->shutdown_timeout_s > 0)
+        printf("[main] 종료 시한 %d초 (넘으면 강제 종료)\n", cfg->shutdown_timeout_s);
+    fflush(stdout);
+
     /* ⓐ 새 연결 받기 중단: 듣기 소켓을 닫으면 이후 접속 시도는 거절된다 */
     close(listen_fd);
     atomic_store(&g_stopping, 1); /* 이제부터 모든 응답은 Connection: close */
@@ -335,7 +370,7 @@ int server_run(int listen_fd, const server_config *cfg)
     int idle_closed = keepalive_stop();
 
     /* ⓒ 처리 중인 요청과 대기열에 들어와 있던 연결을 끝까지 처리한 뒤 일꾼 종료.
-     *    오래 걸려도 요청(30초)/쓰기(10초)/CGI(5초) 시간 제한이 있어 언젠가는 끝난다.
+     *    요청(30초)/쓰기(10초)/CGI(5초) 시간 제한이 있어 언젠가는 끝나지만, 그보다 먼저 ⓞ 의 시한이 걸린다.
      *    기다리기 싫으면 Ctrl+C 를 한 번 더 → 즉시 종료 */
     int busy, queued;
     threadpool_stats(tp, &busy, &queued);
@@ -344,6 +379,7 @@ int server_run(int listen_fd, const server_config *cfg)
            idle_closed, busy, queued);
     fflush(stdout);
     threadpool_destroy(tp);
+    (void)alarm(0); /* 일꾼이 시한 안에 다 끝났다 → 강제 시한 해제 (반환값: 남은 시간, 쓸 일 없음) */
 
     /* ⓓ CGI 자식: 각 일꾼이 자기 CGI 를 waitpid 로 회수한 뒤 끝났으므로 남은 자식이 없어야 한다. 확인 */
     int strays = 0;
