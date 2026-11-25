@@ -55,7 +55,8 @@ static size_t build_head(http_writer *w, int status, const char *content_type,
     http_head_add(&h, "Server", SERVER_NAME);
     if (content_type)
         http_head_add(&h, "Content-Type", content_type);
-    http_head_add_num(&h, "Content-Length", content_length);
+    if (content_length >= 0)
+        http_head_add_num(&h, "Content-Length", content_length);
     http_head_add(&h, "Connection", w->keep_alive ? "keep-alive" : "close");
     if (w->keep_alive && w->ka_timeout_s > 0) {
         /* 참고용 안내: "쉬면 몇 초 뒤에 닫고, 이 연결로 몇 개 더 받을 수 있다" (HTTP/1.0 클라이언트가 주로 봄) */
@@ -105,7 +106,7 @@ int writer_send_body(http_writer *w, const void *data, size_t len)
 {
     if (w->status == 0 || w->failed)
         return -1; /* 머리를 먼저 보내야 한다 */
-    if (w->head_only || len == 0)
+    if (w->head_only || w->status == 204 || w->status == 304 || len == 0)
         return 0;  /* HEAD 요청: 본문은 보내지 않는다 */
     if (send_bytes(w, data, len) < 0) {
         w->failed = 1;
@@ -123,13 +124,14 @@ int writer_send_all(http_writer *w, int status, const char *content_type, const 
     /* 작은 응답은 머리와 본문을 한 버퍼에 모아 write 한 번으로 보낸다.
      * (나눠 보내면 TCP 가 작은 조각을 모으려고 기다리는 지연이 생길 수 있다) */
     char buf[HEAD_BUF_SIZE + 2048];
-    size_t head_len = build_head(w, status, content_type, (long long)len, buf, sizeof(buf));
+    long long content_length = status == 204 ? -1 : (long long)len;
+    size_t head_len = build_head(w, status, content_type, content_length, buf, sizeof(buf));
     if (head_len == 0)
         return -1; /* 조립 실패: 아직 아무것도 안 보냈으므로 failed 가 아니다 → 다른 응답 가능 */
     w->status = status;
-    w->body_len = (long long)len;
+    w->body_len = content_length;
 
-    size_t body_now = w->head_only ? 0 : len;
+    size_t body_now = (w->head_only || status == 204 || status == 304) ? 0 : len;
     if (head_len + body_now <= sizeof(buf)) {
         memcpy(buf + head_len, body, body_now);
         if (send_bytes(w, buf, head_len + body_now) < 0) {

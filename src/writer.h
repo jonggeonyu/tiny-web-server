@@ -50,7 +50,8 @@ int writer_add_header(http_writer *w, const char *name, const char *value);
  * 최종 응답이 아니므로 status 는 그대로 0 이고, 이후 진짜 응답을 보내야 한다. 반환: 0 / -1 */
 int writer_send_continue(http_writer *w);
 
-/* 응답 머리 전송. content_type 이 NULL 이면 Content-Type 생략. 반환: 0 / -1
+/* 응답 머리 전송. content_type 이 NULL 이면 Content-Type 생략.
+ * 본문이 없는 응답에서 content_length 가 -1 이면 Content-Length 생략. 반환: 0 / -1
  * 머리 조립에 실패하면(헤더가 너무 길거나 값이 잘못됨) 아무것도 보내지 않고 -1, status 는 0 그대로
  * → 호출한 쪽이 다른 에러 응답을 보낼 수 있다 */
 int writer_send_head(http_writer *w, int status, const char *content_type,

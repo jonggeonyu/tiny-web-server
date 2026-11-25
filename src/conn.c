@@ -384,7 +384,7 @@ void conn_handle(int client_fd, const server_config *cfg, int served)
             printf(ATAG "%s:%d #%d \"%s %s HTTP/%d.%d\" → %d %s (본문 %lld바이트%s)%s%s%s (%.1fms)\n",
                    format_log_time(log_time, sizeof(log_time)), wid, remote_addr, remote_port, nth,
                    req->method, req->target, req->version_major, req->version_minor, w.status,
-                   http_status_text(w.status), w.body_len, w.head_only ? ", HEAD 라서 생략" : "",
+                   http_status_text(w.status), w.body_len < 0 ? 0 : w.body_len, w.head_only ? ", HEAD 라서 생략" : "",
                    w.keep_alive ? " [유지]" : " [닫음]", w.note ? " - " : "", w.note ? w.note : "",
                    took_ms);
         }

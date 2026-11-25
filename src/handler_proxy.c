@@ -436,10 +436,13 @@ static void send_reply(http_writer *w, const proxy_reply *reply)
     }
 
     int rc;
-    if (w->head_only) {
-        /* HEAD: 본문은 없지만 길이는 GET 과 같게 알려 준다 (백엔드가 알려 준 값) */
-        long long length = head->content_length >= 0 ? head->content_length : 0;
-        rc = writer_send_head(w, head->status, head->content_type, length);
+    if (head->status == 204) {
+        /* 204: 본문도 Content-Length 도 없어야 한다 (RFC 9110 8.6) */
+        rc = writer_send_head(w, 204, head->content_type, -1);
+    } else if (w->head_only || head->status == 304) {
+        /* HEAD, 304: 본문은 없지만 길이는 GET 과 같게 알려 준다 (백엔드가 알려 준 값).
+         * 백엔드가 길이를 안 알려 줬으면 0 이라고 거짓말하지 않고 생략한다 */
+        rc = writer_send_head(w, head->status, head->content_type, head->content_length);
     } else {
         rc = writer_send_all(w, head->status, head->content_type, reply->body,
                              reply->body_length);
