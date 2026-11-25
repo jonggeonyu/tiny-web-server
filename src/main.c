@@ -6,6 +6,7 @@
 #include "config.h"
 #include "server.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -20,11 +21,13 @@
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트] [-c CGI디렉토리] [-t 일꾼수] [-q 대기열] [-T 초] [-S 초]\n",
+    fprintf(stderr, "사용법: %s [-p 포트] [-r 루트] [-c CGI디렉토리] [-t 일꾼수] [-q 대기열] [-T 초] [-S 초] [-b IPv4:포트]...\n",
             prog);
     fprintf(stderr, "  -p 포트   듣는 포트 번호 (1~65535, 기본값 %d)\n", DEFAULT_PORT);
     fprintf(stderr, "  -r 루트   정적 파일 루트 디렉토리 (기본값 %s)\n", DEFAULT_ROOT);
     fprintf(stderr, "  -c 디렉토리 CGI 프로그램 디렉토리 (기본값 %s)\n", DEFAULT_CGI_DIR);
+    fprintf(stderr, "  -b 주소   /api 요청을 전달할 백엔드 IPv4:포트 (최대 %d개)\n",
+            PROXY_MAX_BACKENDS);
     fprintf(stderr, "  -t 개수   일꾼 스레드 수 (1~%d, 기본값 CPU 수 x 2, 4~64 사이)\n", MAX_THREADS);
     fprintf(stderr, "  -q 칸수   대기열 크기 (1~%d, 기본값 일꾼 수 x 4, 최소 %d). 가득 차면 503\n", MAX_QUEUE,
             DEFAULT_QUEUE_MIN);
@@ -43,6 +46,30 @@ static int parse_port(const char *s)
     if (errno != 0 || end == s || *end != '\0' || v < 1 || v > 65535)
         return -1;
     return (int)v;
+}
+
+static int add_backend(server_config *cfg, const char *arg)
+{
+    const char *colon = strchr(arg, ':');
+    char address[INET_ADDRSTRLEN];
+    if (cfg->proxy_backend_count == PROXY_MAX_BACKENDS || !colon ||
+        colon == arg || (size_t)(colon - arg) >= sizeof(address))
+        return -1;
+
+    size_t length = (size_t)(colon - arg);
+    memcpy(address, arg, length);
+    address[length] = '\0';
+    const char *port_text = colon + 1;
+    int port = parse_port(port_text);
+    struct sockaddr_in backend = {.sin_family = AF_INET};
+    if (port < 0 || port_text[strspn(port_text, "0123456789")] != '\0' ||
+        inet_pton(AF_INET, address, &backend.sin_addr) != 1 ||
+        backend.sin_addr.s_addr == htonl(INADDR_ANY))
+        return -1;
+
+    backend.sin_port = htons((unsigned short)port);
+    cfg->proxy_backends[cfg->proxy_backend_count++] = backend;
+    return 0;
 }
 
 /* 기본 일꾼 수: CPU 수 x 2 (4~64 로 제한).
@@ -95,7 +122,7 @@ int main(int argc, char **argv)
     const char *cgi_arg = DEFAULT_CGI_DIR;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:r:c:t:q:T:S:h")) != -1) {
+    while ((opt = getopt(argc, argv, "p:r:c:t:q:T:S:b:h")) != -1) {
         switch (opt) {
         case 'p':
             cfg.port = parse_port(optarg);
@@ -109,6 +136,13 @@ int main(int argc, char **argv)
             break;
         case 'c':
             cgi_arg = optarg;
+            break;
+        case 'b':
+            if (add_backend(&cfg, optarg) < 0) {
+                fprintf(stderr, "잘못된 백엔드 설정: %s (IPv4:포트, 최대 %d개)\n",
+                        optarg, PROXY_MAX_BACKENDS);
+                return 1;
+            }
             break;
         case 't':
             cfg.threads = parse_port(optarg);
@@ -160,6 +194,16 @@ int main(int argc, char **argv)
             cfg.queue_size = DEFAULT_QUEUE_MIN;
         if (cfg.queue_size > MAX_QUEUE)
             cfg.queue_size = MAX_QUEUE;
+    }
+
+    for (int i = 0; i < cfg.proxy_backend_count; i++) {
+        const struct sockaddr_in *backend = &cfg.proxy_backends[i];
+        if ((ntohl(backend->sin_addr.s_addr) >> 24) == 127 &&
+            ntohs(backend->sin_port) == cfg.port) {
+            fprintf(stderr, "백엔드로 서버 자신의 루프백 포트를 지정할 수 없습니다: %d\n",
+                    cfg.port);
+            return 1;
+        }
     }
 
     if (resolve_root(root_arg, cfg.root) < 0)

@@ -4,6 +4,7 @@
 #   make test   : 단위 테스트 빌드 + 실행 (하나라도 실패하면 make가 실패)
 #   make asan   : AddressSanitizer/UBSan 빌드 (build/tiny-asan) + 단위 테스트 실행
 #   make e2e    : 실제 서버를 띄우고 curl 로 기능 확인 (tests/e2e.sh)
+#   make test-proxy : 로컬 백엔드 두 대로 Reverse Proxy 검증 (Python 3)
 #                 make e2e E2E_BIN=build/tiny-asan  → ASan 서버로 (종료 때 LeakSanitizer 누수 검사)
 #   make valgrind : 디버그 빌드(build/tiny-debug)를 valgrind 로 감싸 e2e 실행 → 누수/메모리 오류/fd 집계
 #   make bench  : ab/wrk 부하 측정 → build/bench/results.md (tests/bench.sh)
@@ -36,7 +37,7 @@ ASAN_OBJS      := $(SRCS:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/asan/obj/%.o)
 ASAN_TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD)/asan/tests/%)
 
-.PHONY: all test asan e2e valgrind bench clean
+.PHONY: all test asan e2e test-proxy valgrind bench clean
 
 # 테스트용 .o 같은 중간 파일을 make 가 자동 삭제하지 않게 한다 (재빌드 방지)
 .SECONDARY:
@@ -107,6 +108,9 @@ E2E_BIN ?= $(BUILD)/tiny
 
 e2e: $(E2E_BIN) $(CGI_BINS)
 	E2E_BIN=$(E2E_BIN) bash tests/e2e.sh
+
+test-proxy: $(E2E_BIN)
+	python3 tests/test_reverse_proxy.py $(E2E_BIN)
 
 valgrind: $(BUILD)/tiny-debug $(CGI_BINS)
 	E2E_BIN=$(BUILD)/tiny-debug E2E_VALGRIND=1 bash tests/e2e.sh
