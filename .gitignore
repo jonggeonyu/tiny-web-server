@@ -1,8 +1,12 @@
-labs/
+# 빌드 결과물
 *.o
-build/
-*.d
-cgi-bin/adder
-PLAN.md
-PROJECT.md
-CLAUDE.md
+/backend
+/proxy
+
+# tiny/ 원본을 빌드할 때 생기는 결과물 (원본 파일은 커밋)
+/tiny/tiny
+/tiny/cgi-bin/adder
+
+# 메모리 점검용 빌드 결과물 (make asan)
+/backend-asan
+/proxy-asan

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reverse Proxy 데모 · 화면 시안</title>
+<!--
+  화면 참고용 시안입니다.
+  이 파일 안의 "가짜 서버 흉내" 코드(enqueue, tick, health, req 등)는 참고용이며,
+  실제 데모 페이지(static/demo.*)는 C 서버가 SSE로 보내는 데이터로 그려야 합니다. (docs/SPEC.md 8장)
+-->
+<style>
+html,body{margin:0;height:100%;background:#fff;overflow:hidden}
+body{font-family:"Pretendard","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",system-ui,sans-serif}
+#stage{width:1920px;height:1080px;transform-origin:0 0;background:#fff;color:#2c2c2a;position:absolute;left:0;top:0;padding:24px 32px;box-sizing:border-box}
+#cv{display:block;width:1856px;height:600px}
+.low{display:grid;grid-template-columns:560px 1fr 520px;gap:20px;margin-top:16px;height:300px}
+.pn{border:2px solid #d3d1c7;border-radius:14px;padding:16px 20px;background:#f8f8f6;box-sizing:border-box;overflow:hidden}
+.pt{font-size:16px;color:#5f5e5a;margin-bottom:10px}
+.mt{display:grid;grid-template-columns:repeat(3,1fr);gap:14px 10px}
+.mt div{font-size:16px;color:#5f5e5a}.mt b{display:block;font-size:32px;font-weight:500;color:#2c2c2a;margin-top:2px}
+#log{font-family:"D2Coding",Consolas,"Courier New",monospace;font-size:15px;line-height:1.75;height:236px;overflow-y:auto;color:#2c2c2a}
+#log div{padding:0 6px;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#log div:hover,#log div.sel{background:#ECEAFB}
+#log div.sys{color:#888780;cursor:default}#log div.sys:hover{background:none}
+#log div.er{color:#A32D2D}#log div.hit{color:#3C3489}#log div.rt{color:#854F0B}
+#det{font-size:18px;color:#2c2c2a}
+#det .r{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #e3e1d9}
+#det .k{color:#5f5e5a}#det .v{font-weight:500}
+.bar{display:flex;align-items:center;gap:22px;margin-top:16px;border:2px solid #d3d1c7;border-radius:14px;padding:12px 20px;height:76px;box-sizing:border-box;background:#fff}
+.lb{font-size:17px;color:#5f5e5a}
+.tg{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font-size:19px;color:#2c2c2a}
+.sw{width:48px;height:26px;border-radius:13px;background:#d3d1c7;position:relative}
+.sw::after{content:'';position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s}
+.tg.act .sw{background:#534AB7}.tg.act .sw::after{left:25px}
+.pb{font-size:19px;padding:7px 14px;border:2px solid #2c2c2a;border-radius:10px;background:#fff;color:#2c2c2a;cursor:pointer;font-family:inherit;font-weight:500}
+.pb:hover{background:#f1efe8}
+.pb.gp{border-color:#1D9E75}.pb.go{border-color:#D85A30}
+.pb.hang{background:#FAEEDA;border-color:#EF9F27}
+.pb.bad{background:#FCEBEB;border-color:#E24B4A}
+#tr{width:260px}
+</style>
+</head>
+<body>
+<div id="stage">
+<canvas id="cv" width="1856" height="600"></canvas>
+<div class="low">
+<div class="pn"><div class="pt">통계</div><div class="mt"><div>초당 요청<b id="m1">0</b></div><div>누적<b id="m2">0</b></div><div>Cache Hit<b id="m3">-</b></div><div>에러<b id="m4" style="color:#A32D2D">0</b></div><div>평균 응답<b id="m5">-</b></div></div></div>
+<div class="pn"><div class="pt">요청 로그 · 마우스를 올리면 멈춤</div><div id="log"></div></div>
+<div class="pn"><div class="pt">요청 상세</div><div id="det"></div></div>
+</div>
+<div class="bar"><button class="pb" id="sale">세일 시작</button><span class="lb">트래픽</span><input type="range" id="tr" min="0" max="100" value="50" step="1"><span class="lb" id="trv" style="min-width:80px">50건/초</span>
+<span class="tg act" id="tp"><span class="sw"></span>Proxy</span><span class="tg" id="tc"><span class="sw"></span>캐시</span>
+<span class="lb">서버 상태</span><span class="lb">상품</span><button class="pb srv gp" data-i="0">1</button><button class="pb srv gp" data-i="1">2</button><button class="pb srv gp" data-i="2">3</button>
+<span class="lb">주문</span><button class="pb srv go" data-i="3">1</button><button class="pb srv go" data-i="4">2</button><span style="flex:1"></span><button class="pb" id="rst">초기화</button></div>
+</div>
+<script>
+// ===== 화면 배치: 1920x1080을 창 크기에 맞춰 비율 유지 =====
+const stage=document.getElementById('stage');
+function fit(){const k=Math.min(innerWidth/1920,innerHeight/1080);stage.style.transform='scale('+k+')';stage.style.left=Math.round((innerWidth-1920*k)/2)+'px';stage.style.top=Math.round((innerHeight-1080*k)/2)+'px'}
+fit();addEventListener('resize',fit);
+
+// ===== 상수 (docs/SPEC.md 값과 같음) =====
+const cv=document.getElementById('cv'),g=cv.getContext('2d'),CW=1856,CH=600,CAP=8,SVC=300,QMAX=50,TO=3000;
+const K={bx:'#f4f4f2',bd:'#d3d1c7',t:'#2c2c2a',s:'#5f5e5a',get:'#1D9E75',post:'#D85A30',hit:'#534AB7',red:'#E24B4A',ok:'#1D9E75',amb:'#EF9F27',ambD:'#854F0B'};
+const UC=[230,320],P=[930,320],SX=1470,SW=340,SH=84;
+const SVY=[124,216,308,456,548],NAME=['상품 서버 1','상품 서버 2','상품 서버 3','주문 서버 1','주문 서버 2'],GRP=[0,0,0,1,1];
+const GR=[{name:'상품 그룹',path:'/products/*',ids:[0,1,2],y:44,h:316,fill:'#F2FAF6',st:'#5DCAA5',tx:'#085041'},{name:'주문 그룹',path:'/orders/*',ids:[3,4],y:376,h:220,fill:'#FDF4EF',st:'#F0997B',tx:'#712B13'}];
+const SE=SVY.map(y=>[SX,y]),SIN=SVY.map(y=>[SX+44,y]),NS=SVY.map(y=>[SX-60,y]);
+const EMPTY_DET='<div style="color:#888780;font-size:17px;margin-top:20px">로그 줄을 누르면 요청 정보가 여기 표시됩니다</div>';
+document.getElementById('det').innerHTML=EMPTY_DET;
+
+// ===== 상태 (시안 전용 가짜 서버 흉내) =====
+// mode: 'ok' 정상, 'hang' 응답 멈춤, 'bad' 이상 응답
+let M;
+function fresh(){M={proxy:true,cache:false,mode:['ok','ok','ok','ok','ok'],excl:[0,0,0,0,0],fails:[0,0,0,0,0],rec:[0,0,0,0,0],srv:[0,1,2,3,4].map(()=>({act:[],q:[],ovl:false,done:0,sm:0})),rr:[0,0],cT:{},sale:'pre',timer:0,next:0,hb:0,tot:0,gets:0,hits:0,errs:0,lat:[],win:[],dots:[],fx:[],log:[],sel:null,timers:[]}}
+fresh();
+
+// ===== 그리기 도구 =====
+function rr(x,y,w,h,r){g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath()}
+function icon(x,y,box,c){g.save();g.translate(x,y);g.scale(2.1,2.1);g.strokeStyle=c;g.fillStyle=c;g.lineWidth=1.7;if(box){g.strokeRect(-7,-6,14,11);g.beginPath();g.moveTo(-7,-1);g.lineTo(7,-1);g.stroke()}else{g.beginPath();g.moveTo(-9,-7);g.lineTo(-6,-7);g.lineTo(-3,3);g.lineTo(7,3);g.lineTo(8,-4);g.lineTo(-5,-4);g.stroke();g.beginPath();g.arc(-2,7,1.8,0,7);g.arc(6,7,1.8,0,7);g.fill()}g.restore()}
+function tag(x,y,t,c){g.font='500 19px sans-serif';const w=g.measureText(t).width+20;rr(x-w/2,y-15,w,30,7);g.fillStyle=c;g.fill();g.fillStyle='#fff';g.textAlign='center';g.fillText(t,x,y+7)}
+const lerp=(a,b,u)=>[a[0]+(b[0]-a[0])*u,a[1]+(b[1]-a[1])*u];
+
+// ===== 로그와 상세 =====
+const logEl=document.getElementById('log');let hover=false;
+logEl.addEventListener('mouseenter',()=>hover=true);logEl.addEventListener('mouseleave',()=>{hover=false;renderLog()});
+function sys(t){M.log.push({sys:1,t});trim()}
+function trim(){if(M.log.length>100)M.log.shift();if(!hover)renderLog()}
+const isErr=s=>s>=500||s==='ERR';
+function renderLog(){logEl.innerHTML=M.log.map((e,i)=>e.sys?'<div class="sys">— '+e.t+'</div>':'<div data-i="'+i+'" class="'+(isErr(e.st)?'er':e.hit?'hit':e.d.includes('재시도')?'rt':'')+(M.sel===e?' sel':'')+'">'+e.m+' '+e.p+' → '+e.d+' · '+e.st+' · '+e.lat+'ms</div>').join('');logEl.scrollTop=logEl.scrollHeight}
+logEl.addEventListener('click',ev=>{const d=ev.target.closest('div[data-i]');if(!d)return;const e=M.log[+d.dataset.i];M.sel=e;logEl.querySelectorAll('.sel').forEach(x=>x.classList.remove('sel'));d.classList.add('sel');showDet(e)});
+function showDet(e){const c=isErr(e.st)?'#A32D2D':'#085041';document.getElementById('det').innerHTML='<div class="r"><span class="k">메서드</span><span class="v">'+e.m+'</span></div><div class="r"><span class="k">경로</span><span class="v">'+e.p+'</span></div><div class="r"><span class="k">상태 코드</span><span class="v" style="color:'+c+'">'+e.st+'</span></div><div class="r"><span class="k">요청 시각</span><span class="v">'+e.time+'</span></div>'}
+function ts(d){const z=(n,l)=>String(n).padStart(l||2,'0');return z(d.getHours())+':'+z(d.getMinutes())+':'+z(d.getSeconds())+'.'+z(d.getMilliseconds(),3)}
+function finish(r,st,d,hit){r.lat=Math.max(1,Math.round(performance.now()-r.t0));if(st===200)M.lat.push(r.lat);else M.errs++;if(M.lat.length>300)M.lat.shift();M.log.push({m:r.m,p:r.p,d,st,lat:r.lat,hit,time:r.time});trim()}
+
+// ===== 가짜 백엔드: 동시 8건, 대기열, 과부하 =====
+function enqueue(i,r,label){const s=M.srv[i];r.label=label;if(s.act.length<CAP){r.end=performance.now()+SVC;s.act.push(r)}else{s.q.push(r);if(s.q.length>QMAX){s.ovl=true;sys(NAME[i]+' 과부하로 다운');s.q.forEach(x=>finish(x,503,NAME[i]+' 과부하'));s.q=[]}}}
+
+// ===== 애니메이션 (그릴 확률: 일반 12/rate, 중요 30/rate) =====
+function anim(pts,cols,box,o){const imp=o&&o.imp;const p=Math.min(1,(imp?30:12)/Math.max(1,rate()));if(Math.random()>p)return;M.dots.push(Object.assign({pts,cols,box,k:0,u:0,tags:{},on:{},dash:{},hc:cols[0]},o||{}))}
+function fx(x,y,t,c,ttl){M.fx.push({x,y,t,c,ttl:ttl||1,a:0})}
+function after(ms,fn){M.timers.push({at:performance.now()+ms,fn})}
+function start(){return[UC[0]+150,UC[1]+(Math.random()-0.5)*220]}
+function liveOf(gi){return GR[gi].ids.filter(i=>!M.excl[i])}
+
+// ===== 가짜 Proxy: 요청 하나 처리 =====
+// 조회 75%(상세 45% 캐싱, 재고 30% 캐싱 안 함), 주문 25%
+function req(){M.tot++;M.win.push(performance.now());const post=Math.random()<0.25,pid=1+Math.floor(Math.random()*3),detail=!post&&Math.random()<0.6;
+const r={m:post?'POST':'GET',p:post?'/orders':detail?'/products/'+pid:'/products/'+pid+'/stock',pid,cacheable:detail,t0:performance.now(),time:ts(new Date()),proxy:M.proxy};const col=post?K.post:K.get,a=start();if(!post)M.gets++;
+// Proxy 끔: 모든 요청이 상품 서버 1로 직결
+if(!M.proxy){const s=M.srv[0];
+ if(M.mode[0]==='hang'){after(TO,()=>finish(r,'ERR','상품 서버 1 직결 · 응답 없음'));anim([a,SIN[0],a],[col,K.red],post,{imp:1,hold:{k:1,t:3},tags:{1:['에러',K.red]}});return}
+ if(M.mode[0]==='bad'){finish(r,'ERR','상품 서버 1 직결 · 이상 응답');anim([a,SE[0],a],[col,K.red],post,{imp:1,tags:{1:['에러',K.red]}});return}
+ if(s.ovl){finish(r,503,'상품 서버 1 직결 · 과부하');anim([a,NS[0],a],[col,K.red],post,{imp:1,tags:{1:['503',K.red]}});return}
+ enqueue(0,r,'상품 서버 1 직결');anim([a,SE[0]],[col],post);return}
+// 캐시 HIT (상품 상세만)
+if(detail&&M.cache&&M.cT[pid]>performance.now()){M.hits++;setTimeout(()=>finish(r,200,'Cache HIT',true),2);anim([a,P,a],[col,K.hit],false,{imp:1,on:{0:()=>fx(P[0],P[1]-115,'HIT',K.hit)}});return}
+// 라우팅: /products/* → 상품 그룹, /orders → 주문 그룹
+const gi=post?1:0,L=liveOf(gi);if(!L.length){finish(r,503,GR[gi].name+' 보낼 서버 없음');anim([a,P,a],[col,K.red],post,{imp:1,tags:{1:['503',K.red]}});return}
+// 그룹별 Round-Robin
+const i=L[M.rr[gi]++%L.length];
+// 이상 응답 → 502, 재시도 안 함
+if(M.mode[i]==='bad'){finish(r,502,NAME[i]+' 이상 응답 · 재시도 안 함');anim([a,P,SE[i],P,a],[col,col,K.red,K.red],post,{imp:1,tags:{2:['502',K.red],3:['502',K.red]}});return}
+// 응답 멈춤 → 3초 타임아웃. GET은 재시도, POST는 504
+if(M.mode[i]==='hang'){const alt=L.filter(j=>j!==i&&M.mode[j]==='ok'&&!M.srv[j].ovl),j=alt.length?alt[M.rr[gi]%alt.length]:null;
+ if(post||j===null){after(TO,()=>finish(r,504,NAME[i]+' 타임아웃 · '+(post?'주문은 재시도 안 함':'대체 서버 없음')));anim([a,P,SIN[i],P,a],[col,col,K.red,K.red],post,{imp:1,hold:{k:2,t:3},tags:{2:['504',K.red],3:['504',K.red]}});return}
+ after(TO,()=>send(j,r,NAME[i]+' 타임아웃 → '+NAME[j]+' 재시도'));anim([a,P,SIN[i],SE[j]],[col,col,col],false,{imp:1,hold:{k:2,t:3},dash:{2:1},tags:{2:['재시도 · 타임아웃',K.ambD]}});return}
+if(M.srv[i].ovl){finish(r,503,NAME[i]+' 과부하');anim([a,P,NS[i],P,a],[col,col,K.red,K.red],post,{imp:1,tags:{3:['503',K.red]}});return}
+send(i,r,NAME[i]);anim([a,P,SE[i]],[col,col],post)}
+function send(i,r,label){if(M.mode[i]==='hang'){finish(r,504,label+' · 실패');return}if(M.mode[i]==='bad'){finish(r,502,label+' · 이상 응답');return}if(M.srv[i].ovl){finish(r,503,label+' · 과부하');return}enqueue(i,r,label)}
+
+// ===== 가짜 서버 시간 흐름 =====
+function tick(now){M.timers=M.timers.filter(t=>{if(t.at<=now){t.fn();return false}return true});
+M.srv.forEach((s,i)=>{s.act=s.act.filter(r=>{if(r.end<=now){s.done++;let sfx='';if(r.proxy&&M.cache&&r.m==='GET'){if(r.cacheable){M.cT[r.pid]=now+10000;sfx=' · MISS'}else sfx=' · 재고는 캐시 대상 아님'}finish(r,200,r.label+sfx);return false}return true});
+while(s.act.length<CAP&&s.q.length){const r=s.q.shift();r.end=now+SVC;s.act.push(r)}
+if(s.ovl&&!s.q.length&&s.act.length<3){s.ovl=false;sys(NAME[i]+' 회복')}})}
+
+// ===== 헬스 체크: 2초마다, 연속 2회 실패 → 제외, 1회 성공 → 복귀 =====
+function health(){M.mode.forEach((md,i)=>{if(md!=='ok'){M.fails[i]++;if(M.fails[i]>=2&&!M.excl[i]){M.excl[i]=1;sys('헬스 체크: '+NAME[i]+' 제외 ('+(md==='hang'?'응답 없음':'이상 응답')+')')}}else{if(M.excl[i]){M.excl[i]=0;M.rec[i]=1.6;sys('헬스 체크: '+NAME[i]+' 복귀')}M.fails[i]=0}})}
+
+// ===== 화면 그리기 =====
+function group(G,gi){rr(SX-30,G.y,SW+60,G.h,18);g.fillStyle=G.fill;g.fill();g.strokeStyle=G.st;g.lineWidth=2;g.stroke();g.textAlign='left';g.fillStyle=G.tx;g.font='500 20px sans-serif';g.fillText(G.name,SX-10,G.y+28);g.font='18px sans-serif';g.fillText(G.path,SX+90,G.y+28);
+const L=liveOf(gi);g.textAlign='right';g.font='17px sans-serif';g.fillStyle=G.tx;g.fillText(M.proxy?(L.length?'다음: '+NAME[L[M.rr[gi]%L.length]].slice(3):'보낼 서버 없음'):'',SX+SW+10,G.y+28)}
+function server(i){const x=SX,y=SVY[i]-SH/2,s=M.srv[i],md=M.mode[i],ovl=s.ovl,G=GR[GRP[i]];
+rr(x,y,SW,SH,12);g.fillStyle='#fff';g.fill();g.strokeStyle=md==='hang'?K.amb:(md==='bad'||ovl)?K.red:G.st;g.lineWidth=(md!=='ok'||ovl)?3:1.5;g.stroke();
+g.textAlign='left';g.fillStyle=K.t;g.font='500 23px sans-serif';g.fillText(NAME[i],x+18,y+33);g.textAlign='right';g.font='16px sans-serif';g.fillStyle=K.s;g.fillText('처리 '+s.done.toLocaleString()+'건',x+SW-18,y+32);
+g.textAlign='left';
+if(md==='hang'){g.fillStyle=K.ambD;g.font='500 19px sans-serif';g.fillText('응답 멈춤',x+90,y+66)}
+else if(md==='bad'){g.fillStyle=K.red;g.font='500 19px sans-serif';g.fillText('이상 응답',x+18,y+66)}
+else if(ovl){g.fillStyle=K.red;g.font='500 19px sans-serif';g.fillText('과부하',x+18,y+66)}
+else{s.sm+=((s.act.length+s.q.length)-s.sm)*0.12;const lv=Math.min(1,s.sm/CAP),bw=150;g.fillStyle='#ebe9e2';rr(x+18,y+52,bw,12,6);g.fill();if(lv>0.02){g.fillStyle=lv>0.85?K.red:lv>0.55?K.amb:K.get;rr(x+18,y+52,Math.max(12,bw*lv),12,6);g.fill()}g.textAlign='right';g.fillStyle=K.s;g.font='15px sans-serif';g.fillText('동시 '+s.act.length+'/'+CAP+(s.q.length?' · 대기 '+s.q.length:''),x+SW-18,y+64)}
+g.lineWidth=1}
+function legend(){const items=[['cart','GET 조회',K.get],['box','POST 주문',K.post],['sq','Cache Hit',K.hit],['sq','재시도',K.ambD],['sq','에러',K.red]];let x=CW-10;g.font='17px sans-serif';g.textAlign='right';for(let k=items.length-1;k>=0;k--){const it=items[k];g.fillStyle=K.s;g.fillText(it[1],x,28);if(it[0]==='sq'){x-=g.measureText(it[1]).width+32;g.fillStyle=it[2];rr(x+4,12,17,17,4);g.fill()}else{x-=g.measureText(it[1]).width+56;icon(x+24,21,it[0]==='box',it[2])}x-=24}}
+function ring(x,y,f){g.strokeStyle='#ebe9e2';g.lineWidth=5;g.beginPath();g.arc(x,y,30,0,7);g.stroke();g.strokeStyle=K.amb;g.beginPath();g.arc(x,y,30,-Math.PI/2,-Math.PI/2+Math.PI*2*f);g.stroke();g.lineWidth=1}
+function draw(dt){g.clearRect(0,0,CW,CH);
+g.textAlign='left';g.font='500 26px sans-serif';if(M.sale==='pre'){g.fillStyle=K.s;g.fillText('세일 전',8,30)}else if(M.sale==='count'){g.fillStyle=K.t;g.fillText('세일까지 00:0'+Math.ceil(M.timer),8,30)}else{g.fillStyle=K.post;g.fillText('세일 중',8,30)}
+legend();GR.forEach(group);
+g.lineWidth=2;
+if(M.proxy){g.strokeStyle=K.bd;g.setLineDash([8,10]);g.beginPath();g.moveTo(UC[0]+150,UC[1]);g.lineTo(P[0]-140,P[1]);g.stroke();
+ SVY.forEach((y,i)=>{if(M.excl[i])return;let c=K.bd,d=[8,10];if(M.mode[i]!=='ok'&&M.fails[i]>0){c=K.red;d=[5,7]}if(M.rec[i]>0){c=K.ok;d=[]}g.strokeStyle=c;g.setLineDash(d);g.beginPath();g.moveTo(P[0]+140,P[1]);g.lineTo(SX-30,y);g.stroke()})}
+else{g.strokeStyle=K.red;g.setLineDash([8,10]);g.beginPath();g.moveTo(UC[0]+150,UC[1]);g.lineTo(SX-30,SVY[0]);g.stroke()}
+g.setLineDash([]);
+rr(UC[0]-150,UC[1]-170,300,340,18);g.fillStyle=K.bx;g.fill();g.strokeStyle=K.bd;g.lineWidth=2;g.stroke();g.fillStyle=K.t;g.font='500 28px sans-serif';g.textAlign='center';g.fillText('사용자들',UC[0],UC[1]-125);
+g.globalAlpha=M.proxy?1:0.35;rr(P[0]-140,P[1]-80,280,160,18);g.fillStyle='#fff';g.fill();g.strokeStyle=K.hit;g.lineWidth=4;g.stroke();g.fillStyle=K.t;g.font='500 34px sans-serif';g.fillText('Proxy',P[0],P[1]-4);g.fillStyle=K.s;g.font='18px sans-serif';g.fillText(M.proxy?'경로 라우팅 · Round-Robin':'OFF',P[0],P[1]+30);if(M.proxy&&M.cache)g.fillText('캐시: 상품 상세만',P[0],P[1]+56);g.globalAlpha=1;g.lineWidth=1;
+[0,1,2,3,4].forEach(server);
+SVY.forEach((y,i)=>{if(M.excl[i])tag(SX-130,y-26,'제외됨',K.red);else if(M.rec[i]>0)tag(SX-130,y-26,'복귀',K.ok)});
+M.dots=M.dots.filter(d=>{
+ if(d.ht>0){d.ht-=dt;const p=d.pts[d.k];ring(p[0],p[1],Math.max(0,d.ht/d.hold.t));icon(p[0],p[1],d.box,d.hc);return true}
+ d.u+=dt/0.6;while(d.u>=1){if(d.on[d.k])d.on[d.k]();d.u-=1;d.k++;if(d.k>=d.pts.length-1)return false;if(d.hold&&d.k===d.hold.k&&!d.held){d.held=1;d.ht=d.hold.t;d.u=0;break}}
+ if(d.ht>0)return true;const p=lerp(d.pts[d.k],d.pts[d.k+1],d.u);
+ if(d.dash[d.k]){g.strokeStyle=K.ambD;g.lineWidth=2;g.setLineDash([5,7]);g.beginPath();g.moveTo(d.pts[d.k][0],d.pts[d.k][1]);g.lineTo(p[0],p[1]);g.stroke();g.setLineDash([])}
+ icon(p[0],p[1],d.box,d.cols[d.k]);if(d.tags[d.k])tag(p[0],p[1]-38,d.tags[d.k][0],d.tags[d.k][1]);return true});
+M.fx=M.fx.filter(f=>{f.a+=dt;if(f.a>f.ttl)return false;g.globalAlpha=1-f.a/f.ttl;tag(f.x,f.y-f.a*20,f.t,f.c);g.globalAlpha=1;return true})}
+
+// ===== 메인 루프 =====
+const trEl=document.getElementById('tr'),trv=document.getElementById('trv');
+function rate(){return M.sale==='on'?+trEl.value:1}
+const gap=r=>-Math.log(1-Math.random())/r;   // 포아송 도착: 지수 분포 간격
+let prev=performance.now(),uiT=0;
+function loop(now){const dt=Math.min(0.05,(now-prev)/1000);prev=now;
+if(M.sale==='count'){M.timer-=dt;if(M.timer<=0){M.sale='on';M.next=0;sys('블랙 프라이데이 세일 시작')}}
+const rt=rate();if(rt>0){M.next-=dt;while(M.next<=0){req();M.next+=gap(rt)}}
+tick(now);M.hb+=dt;if(M.hb>=2){M.hb=0;if(M.proxy)health()}M.rec=M.rec.map(v=>v>0?v-dt:0);
+uiT+=dt;if(uiT>=0.4){uiT=0;M.win=M.win.filter(t=>now-t<1000);
+ document.getElementById('m1').textContent=M.win.length;document.getElementById('m2').textContent=M.tot.toLocaleString();
+ document.getElementById('m3').textContent=M.gets&&M.cache?Math.round(100*M.hits/M.gets)+'%':'-';
+ document.getElementById('m4').textContent=M.errs;const rl=M.lat.slice(-150);document.getElementById('m5').textContent=rl.length?Math.round(rl.reduce((a,b)=>a+b,0)/rl.length)+'ms':'-'}
+draw(dt);requestAnimationFrame(loop)}
+requestAnimationFrame(loop);
+
+// ===== 조작 바 =====
+trEl.addEventListener('input',()=>{trv.textContent=trEl.value+'건/초';M.next=Math.min(M.next,gap(Math.max(1,+trEl.value)))});
+document.getElementById('sale').addEventListener('click',()=>{if(M.sale!=='pre')return;M.sale='count';M.timer=5;sys('카운트다운 시작')});
+const tp=document.getElementById('tp'),tc=document.getElementById('tc');
+tp.addEventListener('click',()=>{M.proxy=!M.proxy;tp.classList.toggle('act',M.proxy);sys(M.proxy?'Proxy 켜짐':'Proxy 꺼짐 · 상품 서버 1로 직결')});
+tc.addEventListener('click',()=>{M.cache=!M.cache;tc.classList.toggle('act',M.cache);M.cT={};M.hits=0;M.gets=0;sys(M.cache?'캐시 켜짐 · 상품 상세만 · TTL 10초':'캐시 꺼짐 · 저장 내용 비움')});
+// 서버 버튼: 정상 → 멈춤 → 이상 응답 → 정상
+const NEXT={ok:'hang',hang:'bad',bad:'ok'},LABEL={ok:' 정상',hang:' 응답 멈춤',bad:' 이상 응답'};
+document.querySelectorAll('.pb.srv').forEach(b=>b.addEventListener('click',()=>{const i=+b.dataset.i;M.mode[i]=NEXT[M.mode[i]];b.classList.toggle('hang',M.mode[i]==='hang');b.classList.toggle('bad',M.mode[i]==='bad');sys(NAME[i]+LABEL[M.mode[i]])}));
+document.getElementById('rst').addEventListener('click',()=>{fresh();trEl.value=50;trv.textContent='50건/초';tp.classList.add('act');tc.classList.remove('act');document.querySelectorAll('.pb.srv').forEach(b=>b.classList.remove('hang','bad'));document.getElementById('det').innerHTML=EMPTY_DET;sys('초기화됨');renderLog()});
+sys('대기 중 · 세일 시작을 눌러 보세요');
+</script>
+</body>
+</html>

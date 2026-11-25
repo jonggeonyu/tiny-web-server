@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reverse Proxy 데모</title>
+<!--
+  Reverse Proxy 데모 화면 (docs/SPEC.md 8장). 모양은 docs/prototype.html을 따릅니다.
+  - 기본: Proxy가 보내는 SSE(/api/events)로 그리고, 버튼은 /api/control/* 를 부릅니다.
+  - demo.html?mock=1: 서버 없이 화면 안의 "가짜 이벤트 공급기"로 같은 그리기 코드를 씁니다(발표 백업).
+  외부 CDN·프레임워크 없이 순수 HTML/CSS/JS만 씁니다.
+-->
+<link rel="stylesheet" href="demo.css">
+</head>
+<body>
+<div id="stage">
+<canvas id="cv" width="1856" height="600"></canvas>
+<div id="banner"></div>
+<div class="low">
+<div class="pn"><div class="pt">통계</div><div class="mt"><div>초당 요청<b id="m1">0</b></div><div>누적<b id="m2">0</b></div><div>Cache Hit<b id="m3">-</b></div><div>에러<b id="m4" style="color:#A32D2D">0</b></div><div>평균 응답<b id="m5">-</b></div></div></div>
+<div class="pn"><div class="pt">요청 로그 · 마우스를 올리면 멈춤</div><div id="log"></div></div>
+<div class="pn"><div class="pt">요청 상세</div><div id="det"></div></div>
+</div>
+<div class="bar"><button class="pb" id="sale">세일 시작</button><span class="lb">트래픽</span><input type="range" id="tr" min="0" max="100" value="50" step="1"><span class="lb" id="trv" style="min-width:80px">50건/초</span>
+<span class="tg act" id="tp"><span class="sw"></span>Proxy</span><span class="tg" id="tc"><span class="sw"></span>캐시</span>
+<span class="lb">서버 상태</span><span class="lb">상품</span><button class="pb srv gp" data-i="0">1</button><button class="pb srv gp" data-i="1">2</button><button class="pb srv gp" data-i="2">3</button>
+<span class="lb">주문</span><button class="pb srv go" data-i="3">1</button><button class="pb srv go" data-i="4">2</button><span style="flex:1"></span><button class="pb" id="rst">초기화</button>
+<!-- 서버 버튼을 누르면 버튼 바로 위에 뜨는 작은 메뉴 (demo.js의 openMenu) -->
+<div id="srvmenu"><button class="pb mi" data-mode="normal">정상</button><button class="pb mi hang" data-mode="hang">멈춤</button><button class="pb mi bad" data-mode="bad">이상 응답</button></div></div>
+</div>
+<script src="demo.js"></script>
+</body>
+</html>
